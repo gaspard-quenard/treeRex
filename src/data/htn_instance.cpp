@@ -403,7 +403,7 @@ void HtnInstance::sortSubtasks(std::vector<int> &subtasks_id, std::vector<std::p
     }
 }
 
-const Parameters& HtnInstance::getParams() const
+Parameters& HtnInstance::getParams() const
 {
     return _params;
 }

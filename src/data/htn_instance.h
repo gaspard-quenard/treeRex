@@ -130,7 +130,7 @@ public:
      */
     HtnInstance(Parameters &params);
 
-    const Parameters& getParams() const;
+    Parameters& getParams() const;
 
     const AbstractTask& getAbstractTaskById(int task_id) const;
     const Action& getActionById(int action_id) const;
