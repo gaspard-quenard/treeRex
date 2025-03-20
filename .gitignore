@@ -1,0 +1,11 @@
+_*
+*.pdf
+*.o
+*.a
+lib/*
+treerex
+.vscode
+OUT
+*.cnf
+build/
+ProblemProcessing/
