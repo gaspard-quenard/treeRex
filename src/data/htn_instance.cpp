@@ -333,7 +333,6 @@ void HtnInstance::extractMethods(std::ifstream &file, int &line_idx)
     while (std::getline(file, line) && !line.empty())
     {
         std::string method_name = line;
-        Log::i("Method name: %s\n", method_name.c_str());
         ++line_idx;
 
         std::vector<int> abstract_task_ids = parseIntegerList(file, line_idx);
