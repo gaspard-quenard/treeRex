@@ -138,6 +138,7 @@ public:
     const Method& getMethodById(int method_id) const;
     const Predicate& getPredicateById(int pred_id) const;
     const AbstractTask& getRootTask() const;
+    const bool isAbstractTask(int task_id) const;
     const std::vector<Predicate>& getPredicates() const;
     Action getGoalAction() const;
     const std::vector<int>& getInitState() const;

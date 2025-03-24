@@ -269,7 +269,6 @@ void HtnInstance::extractTasksNames(std::ifstream &file, int &line_idx)
 
     std::string line;
     std::getline(file, line);
-    Log::i("Line: %s\n", line.c_str());
     int num_tasks = std::stoi(line);
     _abstr_tasks.reserve(num_tasks - _actions.size());
     ++line_idx;
@@ -413,6 +412,11 @@ Parameters& HtnInstance::getParams() const
 const AbstractTask& HtnInstance::getAbstractTaskById(int task_id) const
 {
     return _abstr_tasks[task_id - _actions.size()];
+}
+
+const bool HtnInstance::isAbstractTask(int task_id) const
+{
+    return task_id >= _actions.size();
 }
 
 const Action& HtnInstance::getActionById(int action_id) const

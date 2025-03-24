@@ -36,7 +36,7 @@ namespace Names {
 
     std::string to_string(const AbstractTask& at) {
         std::string out = at.getName() + " { ";
-        for (int idx : at.getDecompositionMethodIdx()) {
+        for (int idx : at.getDecompositionMethodsIdx()) {
             out += g_methods->at(idx).getName() + " ";
         }
         out += "}";

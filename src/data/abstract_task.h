@@ -9,7 +9,7 @@ class AbstractTask // : public HTNOp
 private:
     int _id;
     std::string _name;
-    std::vector<int> _decomposition_method_idx;
+    std::vector<int> _decomposition_methods_idx;
 
 public:
     AbstractTask(int id, std::string name) : _id(id), _name(name) {}
@@ -21,12 +21,12 @@ public:
 
     void addDecompositionMethod(int method_idx)
     {
-        _decomposition_method_idx.push_back(method_idx);
+        _decomposition_methods_idx.push_back(method_idx);
     }
 
-    const std::vector<int> &getDecompositionMethodIdx() const
+    const std::vector<int> &getDecompositionMethodsIdx() const
     {
-        return _decomposition_method_idx;
+        return _decomposition_methods_idx;
     }
 };
 
