@@ -19,6 +19,7 @@ private:
     std::vector<Action> _actions;
     std::vector<AbstractTask> _abstr_tasks;
     std::vector<Method> _methods;
+    int _id_goal_action;
 
     int _root_task_idx;
     std::vector<int> _init_state;
@@ -137,6 +138,10 @@ public:
     const Method& getMethodById(int method_id) const;
     const Predicate& getPredicateById(int pred_id) const;
     const AbstractTask& getRootTask() const;
+    const std::vector<Predicate>& getPredicates() const;
+    Action getGoalAction() const;
+    const std::vector<int>& getInitState() const;
+    const int getNumPredicates() const;
 
 
 };

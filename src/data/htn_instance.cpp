@@ -76,6 +76,9 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
     extractTasksNames(file, line_idx);
     extractInitRootTaskIdx(file, line_idx);
     extractMethods(file, line_idx);
+    
+    // Initialize the goal action
+    _id_goal_action = _actions.size() + _abstr_tasks.size();
 
     Names::init(_predicates, _actions, _abstr_tasks, _methods);
 
@@ -430,4 +433,24 @@ const Predicate& HtnInstance::getPredicateById(int pred_id) const
 const AbstractTask& HtnInstance::getRootTask() const
 {
     return _abstr_tasks[_root_task_idx - _actions.size()];
+}
+
+const std::vector<Predicate>& HtnInstance::getPredicates() const
+{
+    return _predicates;
+}
+
+Action HtnInstance::getGoalAction() const
+{
+    return Action(/*id=*/_id_goal_action, /*preconditions=*/_goal_state, /*pos_effs=*/{}, /*neg_effs=*/{});
+}
+
+const std::vector<int>& HtnInstance::getInitState() const
+{
+    return _init_state;
+}
+
+const int HtnInstance::getNumPredicates() const
+{
+    return _predicates.size();
 }
