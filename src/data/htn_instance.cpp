@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <unordered_map>
+#include <queue>
 
 #include "util/log.h"
 #include "util/command_utils.h"
@@ -76,7 +77,7 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
     extractTasksNames(file, line_idx);
     extractInitRootTaskIdx(file, line_idx);
     extractMethods(file, line_idx);
-    
+
     // Initialize the goal action
     _id_goal_action = _actions.size() + _abstr_tasks.size();
 
@@ -375,41 +376,70 @@ void HtnInstance::extractMethods(std::ifstream &file, int &line_idx)
     }
 }
 
-void HtnInstance::sortSubtasks(std::vector<int> &subtasks_id, std::vector<std::pair<int, int>> &ordering_constains)
+void HtnInstance::sortSubtasks(std::vector<int> &subtasks_id, std::vector<std::pair<int, int>> &ordering_constraints)
 {
-    // Create a map to store the index of each subtask
-    std::unordered_map<int, int> subtasks_idx;
-    for (int i = 0; i < subtasks_id.size(); i++)
+    int n = subtasks_id.size();
+    // Build a graph using indices as nodes.
+    std::vector<std::vector<int>> graph(n);
+    std::vector<int> indegree(n, 0);
+
+    // Build the graph based on ordering constraints (which are indices).
+    for (const auto &constraint : ordering_constraints)
     {
-        subtasks_idx[subtasks_id[i]] = i;
+        int u = constraint.first;  // index of the first subtask
+        int v = constraint.second; // index of the second subtask
+
+        // Check that indices are in range.
+        if (u < 0 || u >= n || v < 0 || v >= n)
+        {
+            throw std::runtime_error("Ordering constraint index out of range");
+        }
+        graph[u].push_back(v);
+        indegree[v]++;
     }
 
-    // Sort the subtasks according to the ordering constraints
-    for (int i = 0; i < ordering_constains.size(); i++)
+    // Use a queue for the topological sort.
+    std::queue<int> q;
+    for (int i = 0; i < n; i++)
     {
-        int subtask1_id = ordering_constains[i].first;
-        int subtask2_id = ordering_constains[i].second;
-        int subtask1_idx = subtasks_idx[subtask1_id];
-        int subtask2_idx = subtasks_idx[subtask2_id];
-        if (subtask1_idx > subtask2_idx)
+        if (indegree[i] == 0)
+            q.push(i);
+    }
+
+    // Kahn's algorithm for topological sorting.
+    std::vector<int> sortedIndices;
+    while (!q.empty())
+    {
+        int u = q.front();
+        q.pop();
+        sortedIndices.push_back(u);
+        for (int v : graph[u])
         {
-            // Swap the subtasks
-            int tmp = subtasks_id[subtask1_idx];
-            subtasks_id[subtask1_idx] = subtasks_id[subtask2_idx];
-            subtasks_id[subtask2_idx] = tmp;
-            // Update the index of the subtasks
-            subtasks_idx[subtask1_id] = subtask2_idx;
-            subtasks_idx[subtask2_id] = subtask1_idx;
+            if (--indegree[v] == 0)
+                q.push(v);
         }
     }
+
+    if (sortedIndices.size() != n)
+    {
+        throw std::runtime_error("Cycle detected in ordering constraints");
+    }
+
+    // Build the sorted subtasks list according to the topologically sorted indices.
+    std::vector<int> sortedSubtasks(n);
+    for (int i = 0; i < n; i++)
+    {
+        sortedSubtasks[i] = subtasks_id[sortedIndices[i]];
+    }
+    subtasks_id = sortedSubtasks;
 }
 
-Parameters& HtnInstance::getParams() const
+Parameters &HtnInstance::getParams() const
 {
     return _params;
 }
 
-const AbstractTask& HtnInstance::getAbstractTaskById(int task_id) const
+const AbstractTask &HtnInstance::getAbstractTaskById(int task_id) const
 {
     return _abstr_tasks[task_id - _actions.size()];
 }
@@ -419,27 +449,27 @@ const bool HtnInstance::isAbstractTask(int task_id) const
     return task_id >= _actions.size();
 }
 
-const Action& HtnInstance::getActionById(int action_id) const
+const Action &HtnInstance::getActionById(int action_id) const
 {
     return _actions[action_id];
 }
 
-const Method& HtnInstance::getMethodById(int method_id) const
+const Method &HtnInstance::getMethodById(int method_id) const
 {
     return _methods[method_id];
 }
 
-const Predicate& HtnInstance::getPredicateById(int pred_id) const
+const Predicate &HtnInstance::getPredicateById(int pred_id) const
 {
     return _predicates[pred_id];
 }
 
-const AbstractTask& HtnInstance::getRootTask() const
+const AbstractTask &HtnInstance::getRootTask() const
 {
     return _abstr_tasks[_root_task_idx - _actions.size()];
 }
 
-const std::vector<Predicate>& HtnInstance::getPredicates() const
+const std::vector<Predicate> &HtnInstance::getPredicates() const
 {
     return _predicates;
 }
@@ -449,7 +479,7 @@ Action HtnInstance::getGoalAction() const
     return Action(/*id=*/_id_goal_action, /*preconditions=*/_goal_state, /*pos_effs=*/{}, /*neg_effs=*/{});
 }
 
-const std::vector<int>& HtnInstance::getInitState() const
+const std::vector<int> &HtnInstance::getInitState() const
 {
     return _init_state;
 }
