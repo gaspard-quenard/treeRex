@@ -5,6 +5,7 @@
 #include <string>
 #include <optional>
 #include <fstream>
+#include <unordered_set>
 #include "data/action.h"
 #include "data/method.h"
 #include "data/abstract_task.h"
@@ -20,10 +21,12 @@ private:
     std::vector<AbstractTask> _abstr_tasks;
     std::vector<Method> _methods;
     int _id_goal_action;
+    Action *_blankAction;
 
     int _root_task_idx;
-    std::vector<int> _init_state;
-    std::vector<int> _goal_state;
+    std::unordered_set<int> _init_state;
+    std::unordered_set<int> _goal_state;
+    std::vector<int> _all_fact_vars_goal;
 
     /**
      * Parse the domain and problem files using pandaPIparser.
@@ -131,20 +134,22 @@ public:
      */
     HtnInstance(Parameters &params);
 
-    Parameters& getParams() const;
+    Parameters &getParams() const;
 
-    const AbstractTask& getAbstractTaskById(int task_id) const;
-    const Action& getActionById(int action_id) const;
-    const Method& getMethodById(int method_id) const;
-    const Predicate& getPredicateById(int pred_id) const;
-    const AbstractTask& getRootTask() const;
+    const AbstractTask &getAbstractTaskById(int task_id) const;
+    const Action &getActionById(int action_id) const;
+    const Method &getMethodById(int method_id) const;
+    const Predicate &getPredicateById(int pred_id) const;
     const bool isAbstractTask(int task_id) const;
-    const std::vector<Predicate>& getPredicates() const;
-    Action getGoalAction() const;
-    const std::vector<int>& getInitState() const;
+    const Action &getBlankAction() const;
+    const AbstractTask &getRootTask() const;
+    const bool isRootTask(const AbstractTask &task) const;
+    const std::vector<Predicate> &getPredicates() const;
+    // Action getGoalAction() const;
+    const std::unordered_set<int> &getInitState() const;
+    const std::unordered_set<int> &getGoalState() const;
     const int getNumPredicates() const;
-
-
+    const std::vector<int> &getFactVarsGoal() const;
 };
 
 #endif // HTN_INSTANCE_H

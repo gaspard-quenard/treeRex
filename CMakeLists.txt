@@ -51,10 +51,10 @@ endif()
 # Source files (without main.cpp)
 
 set(BASE_SOURCES
-    src/util/log.cpp src/util/params.cpp src/util/signal_manager.cpp src/util/timer.cpp src/util/project_utils.cpp src/util/command_utils.cpp src/util/names.cpp
-    src/data/htn_instance.cpp
-    src/sat/encoding.cpp
-    src/algo/planner.cpp
+    src/util/log.cpp src/util/params.cpp src/util/signal_manager.cpp src/util/timer.cpp src/util/project_utils.cpp src/util/command_utils.cpp src/util/names.cpp src/util/stacktrace.cpp
+    src/data/htn_instance.cpp src/data/pdt_node.cpp
+    src/sat/encoding.cpp src/sat/variable_provider.cpp
+    src/algo/planner.cpp src/algo/plan_manager.cpp
 )
 
 

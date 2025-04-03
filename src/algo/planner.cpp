@@ -1,132 +1,121 @@
 #include "algo/planner.h"
+#include "util/names.h"
 
 #include "util/names.h"
 
-void printDebug(HtnInstance &htn)
-{
-    Log::i("To help starting\n");
-    Log::i("You can get and print the predicates using '_htn.getPredicates()':\n");
-    for (auto &pred : htn.getPredicates())
-    {
-        Log::i("Predicate: %s\n", TOSTR(pred));
-    }
-
-    Log::i("You can get the initial abstract task using '_htn.getRootTask()':\n");
-    Log::i("Format of an abstract task printed is 'name { method1 method2 ... methodN}' where 'methodX' is a method which can be applied to the task.\n");
-    const AbstractTask &_root_task = htn.getRootTask();
-    Log::i("Root task: %s\n", TOSTR(_root_task));
-
-    Log::i("\nTo get all the methods which are applicable to a given abstract task, you can use <abstract_task>.getDecompositionMethodsIdx():\n");
-    Log::i("It will return a vector of integers, each integer being the index of a method. You can then use '_htn.getMethodById(<index>)' to get the method.\n");
-    Log::i("Format of a method printed is 'name { subtask1 subtask2 ... subtaskN}' where 'subtaskI' is ith subtask of the method.\n");
-    std::vector<int> methods_idx = _root_task.getDecompositionMethodsIdx();
-    for (int method_idx : methods_idx)
-    {
-        const Method &method = htn.getMethodById(method_idx);
-        Log::i("Method: %s\n", TOSTR(method));
-    }
-
-    const Method &first_method = htn.getMethodById(methods_idx[0]);
-    Log::i("\nTo get the subtasks of a method, you can use <method>.getSubtasksIdx():\n");
-    Log::i("It will return a vector of integers, each integer being the index of a subtask\n");
-    Log::i("The subtask can be either an abstract task or an action. You can check the type of the subtask using '_htn.isAbstractTask(<index>)'.\n");
-    Log::i("To get the subtask, you can use '_htn.getAbstractTaskById(<index>)' or '_htn.getActionById(<index>)'.\n");
-    std::vector<int> subtasks_idx = first_method.getSubtasksIdx();
-    Log::i("Subtask of method %s:\n", TOSTR(first_method));
-    for (int subtask_idx : subtasks_idx)
-    {
-        if (htn.isAbstractTask(subtask_idx))
-        {
-            const AbstractTask &subtask = htn.getAbstractTaskById(subtask_idx);
-            Log::i("  Abstract subtask: %s\n", TOSTR(subtask));
-        }
-        else
-        {
-            const Action &subtask = htn.getActionById(subtask_idx);
-            Log::i("  Primitive subtask: %s\n", TOSTR(subtask));
-        }
-    }
-
-    Log::i("To get the initial state, you can use '_htn.getInitState()':\n");
-    Log::i("It will return a vector of integers, each integer being the index of a predicate.\n");
-    Log::i("You can then use '_htn.getPredicateById(<index>)' to get the predicate.\n");
-    std::vector<int> init_state = htn.getInitState();
-    Log::i("Initial state:\n");
-    for (int pred_id : init_state)
-    {
-        const Predicate &pred = htn.getPredicateById(pred_id);
-        Log::i("  %s\n", TOSTR(pred));
-    }
-
-    Log::i("The goal state has been compiled into an action whose preconditions are the goal state predicates.\n");
-    Log::i("You can get this action using '_htn.getGoalAction()':\n");
-    Log::i("It will return an action with preconditions being the goal state predicates.\n");
-    Log::i("Format of an action printed is 'precond1 precond2 ... precondN { name } eff1 eff2 ... effN' where 'precondI' is ith precondition and 'effI' is ith effect.\n");
-    Action goal_action = htn.getGoalAction();
-    Log::i("Goal action: %s\n", TOSTR(goal_action));
-
-    const Action &first_action = htn.getActionById(0);
-    Log::i("To get the preconditions of an action, you can use <action>.getPreconditionsIdx()");
-    Log::i("It will return a vector of integers, each integer being the index of a predicate.\n");
-    Log::i("First action: %s\n", TOSTR(first_action));
-    std::vector<int> preconditions_idx = first_action.getPreconditionsIdx();
-    Log::i("Preconditions of first action:\n");
-    for (int pred_id : preconditions_idx)
-    {
-        const Predicate &pred = htn.getPredicateById(pred_id);
-        Log::i("  %s\n", TOSTR(pred));
-    }
-    Log::i("To get the positive effects of an action, you can use <action>.getPosEffsIdx()");
-    Log::i("It will return a vector of integers, each integer being the index of a predicate.\n");
-    Log::i("First action: %s\n", TOSTR(first_action));
-    std::vector<int> pos_effs_idx = first_action.getPosEffsIdx();
-    Log::i("Positive effects of first action:\n");
-    for (int pred_id : pos_effs_idx)
-    {
-        const Predicate &pred = htn.getPredicateById(pred_id);
-        Log::i("  %s\n", TOSTR(pred));
-    }
-    Log::i("To get the negative effects of an action, you can use <action>.getNegEffsIdx()");
-    Log::i("It will return a vector of integers, each integer being the index of a predicate.\n");
-    Log::i("First action: %s\n", TOSTR(first_action));
-    std::vector<int> neg_effs_idx = first_action.getNegEffsIdx();
-    Log::i("Negative effects of first action:\n");
-    for (int pred_id : neg_effs_idx)
-    {
-        const Predicate &pred = htn.getPredicateById(pred_id);
-        Log::i("  %s\n", TOSTR(pred));
-    }
-}
 
 int Planner::findPlan()
 {
 
-    Log::i("Starting the planner\n");
-    printDebug(_htn);
+    std::vector<PdtNode*> leaf_nodes;
 
     // Initialize Tree
+    _root_node = new PdtNode(/*parent=*/nullptr);
+    int root_method_idx = _htn.getRootTask().getDecompositionMethodsIdx()[0];
+    _root_node->addMethodIdx(root_method_idx);
+
+    leaf_nodes.push_back(_root_node);
+
+    // Assign the SAT variables for the new layer
+    for (PdtNode* node : leaf_nodes)
+    {
+        node->assignSatVariables(_htn, _print_var_names);
+    }
 
     // Set SAT variables for the initial layer
 
     // Encode the inital layer
+    _enc.initalEncode(_root_node);
 
     // Run main loop
     bool solved = false;
     int max_depth = 100;
     int current_depth = 0;
+    std::vector<PdtNode*> new_leaf_nodes;
     while (!solved && current_depth < max_depth)
     {
         current_depth++;
-        // Expand the Tree with a new layer
+        Log::i("For depth %d\n", current_depth);
 
-        // Set SAT variables for the new layer
 
-        // Encode the new layer
+        Log::i("  Expanding layer...\n");
+        // Expand all the leaf nodes
+        for (PdtNode* node : leaf_nodes)
+        {
+            node->expand(_htn);
+            for (PdtNode* child : node->getChildren())
+            {
+                new_leaf_nodes.push_back(child);
+            }
+        }
 
+        Log::i("  Assigning SAT variables...\n");
+        // Assign the SAT variables for the new layer
+        for (PdtNode* node : new_leaf_nodes)
+        {
+            // Log::i("%s\n", TOSTR(*node));
+            node->assignSatVariables(_htn, _print_var_names);
+        }
+
+        Log::i("  Encoding...\n");
+        // Encode the new leaf nodes
+        _enc.encode(new_leaf_nodes);
+
+        // Add assumptions that each leaf node must be primitive
+        std::vector<int> prim_vars;
+        for (PdtNode* node : new_leaf_nodes)
+        {
+            prim_vars.push_back(node->getPrimVariable());
+        }
+        _enc.addAssumptions(prim_vars);
+
+        Log::i("  Solving...\n");
         // Launch the SAT solver
+        int result = _enc.solve();
+        // _enc.writeFormula("formula_" + std::to_string(current_depth) + ".cnf");
+        Log::i("    Result: %d\n", result);
+        solved = (result == 10);
+
+        leaf_nodes = new_leaf_nodes;
+        new_leaf_nodes.clear();
+    }
+    // If solved, extract the plan and verify it
+    if (!solved) {
+        Log::w("No success. Exiting.\n");
+        return 1;
     }
 
-    // If solved, extract the plan and verify it
+    Log::i("Found a solution at layer %i.\n", current_depth);
+
+    // For each node in the PDT, indicate which action or method is true
+    _enc.setOpsTrueInTree(/*node=*/_root_node);
+
+    // Generate the plan
+    if (!_plan_manager.generatePlan(_root_node))
+    {
+        Log::e("Error: Failed to generate the final plan.\n");
+        return 1;
+    }
+    if (_verify_plan)
+    {
+        // Verify the plan
+        if (!_plan_manager.verifyPlan())
+        {
+            Log::e("Error: Plan verification failed.\n");
+            return 1;
+        }
+        Log::i("Plan verified successfully.\n");
+    }
+    // Output the plan
+    Log::log_notime(Log::V0_ESSENTIAL, _plan_manager.getPlanString().c_str());
+    Log::i("End of solution plan. (counted length of %i)\n", _plan_manager.getPlanSize());
+
+    if (_write_plan) {
+        if (!_plan_manager.outputPlan("plan.txt")) {
+            Log::e("Error: Failed to write the plan to file.\n");
+            return 1;
+        }
+    }
 
     return 0;
 }

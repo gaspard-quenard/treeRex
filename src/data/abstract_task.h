@@ -28,6 +28,11 @@ public:
     {
         return _decomposition_methods_idx;
     }
+
+    const int getId() const
+    {
+        return _id;
+    }
 };
 
 #endif // ABSTRACT_TASK_H

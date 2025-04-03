@@ -16,7 +16,7 @@ public:
     {
         exiting = true;
         numSignals++;
-        if (numSignals == 5)
+        if (numSignals == 1)
         {
             // Forced exit
             exit(0);

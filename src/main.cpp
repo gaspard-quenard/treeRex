@@ -9,13 +9,14 @@
 #include <exception>
 #include <execinfo.h>
 #include <signal.h>
-
+#include <exception>
 
 #include "util/log.h"
 #include "util/params.h"
 #include "util/timer.h"
 #include "util/signal_manager.h"
 #include "util/statistics.h"
+#include "util/stacktrace.h" // Include the stacktrace utility
 #include "data/htn_instance.h"
 #include "algo/planner.h"
 
@@ -58,6 +59,15 @@ void outputBanner(bool colors) {
 
 
 void handleSignal(int signum) {
+    
+    // Print stack trace if signal is SIGSEGV or SIGABRT
+    if (signum == SIGSEGV || signum == SIGABRT) {
+        Log::e("Received signal %d (%s)\n", signum, strsignal(signum));
+        StackTrace::print_stacktrace("Signal handler");
+
+        // exit immediately
+        std::exit(EXIT_FAILURE);
+    }
     SignalManager::signalExit();
 }
 
@@ -85,9 +95,16 @@ void run(Parameters& params) {
 }
 
 int main(int argc, char** argv) {
-    
-    signal(SIGTERM, handleSignal);
-    signal(SIGINT, handleSignal);
+
+    // Set the custom terminate handler early
+    // std::set_terminate(my_terminate_handler);
+
+    // Register signal handlers
+    signal(SIGTERM, handleSignal); // Termination request
+    signal(SIGINT, handleSignal);  // Interrupt (Ctrl+C)
+    signal(SIGSEGV, handleSignal); // Segmentation fault
+    signal(SIGABRT, handleSignal); // Abort signal (often from assert or std::terminate)
+
 
     Timer::init();
 
@@ -116,6 +133,8 @@ int main(int argc, char** argv) {
         exit(1);
     }
 
+    // Removed the try...catch block. Let uncaught exceptions trigger std::terminate.
     run(params);
-    return 0;
+
+    return 0; // Normal exit if run() completes without uncaught exceptions
 }

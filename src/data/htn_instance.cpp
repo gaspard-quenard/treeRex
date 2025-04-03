@@ -4,6 +4,8 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <queue>
+#include <assert.h>
 #include <unordered_map>
 #include <queue>
 
@@ -11,6 +13,7 @@
 #include "util/command_utils.h"
 #include "util/project_utils.h"
 #include "util/names.h"
+#include "sat/variable_provider.h"
 
 HtnInstance::HtnInstance(Parameters &params) : _params(params)
 {
@@ -47,7 +50,8 @@ std::optional<std::string> HtnInstance::groundProblem(const std::string &parsed_
 
     std::filesystem::path grounder_path = getProjectRootDir() / "lib" / "pandaPIgrounder";
     std::string output_filepath = (getProblemProcessingDir() / "problem.grounded").string();
-    std::string command = grounder_path.string() + " --write-full-methods-name " + parsed_problem_filepath + " " + output_filepath;
+    // std::string command = grounder_path.string() + " --write-full-methods-name " + parsed_problem_filepath + " " + output_filepath;
+    std::string command = grounder_path.string() + " " + parsed_problem_filepath + " " + output_filepath;
 
     if (runCommand(command, "Grounding the parsed problem failed.") != 0)
         return std::nullopt;
@@ -78,10 +82,20 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
     extractInitRootTaskIdx(file, line_idx);
     extractMethods(file, line_idx);
 
+    // Initialize the blank action
+    _blankAction = new Action(-1, {}, {}, {});
+    _blankAction->addName("blank");
+
     // Initialize the goal action
     _id_goal_action = _actions.size() + _abstr_tasks.size();
 
-    Names::init(_predicates, _actions, _abstr_tasks, _methods);
+    // Initialize all the facts vars for the goal state
+    for (int i = 0; i < _predicates.size(); i++)
+    {
+        _all_fact_vars_goal.push_back(VariableProvider::nextVar());
+    }
+
+    Names::init(_predicates, _actions, _abstr_tasks, _methods, _blankAction);
 
     // To debug, print all structures
     // Log::i("Predicates:\n");
@@ -258,10 +272,14 @@ void HtnInstance::extractInitGoalStates(std::ifstream &file, int &line_idx)
        Any state feature that does not occur in this line is false in the initial state
      */
     skipUntil(file, ";; initial state", line_idx);
-    _init_state = parseIntegerList(file, line_idx);
+    std::vector<int> init_state = parseIntegerList(file, line_idx);
+    // Convert the initial state to a unordered set
+    _init_state = std::unordered_set<int>(init_state.begin(), init_state.end());
 
     skipUntil(file, ";; goal", line_idx);
-    _goal_state = parseIntegerList(file, line_idx);
+    std::vector<int> goal_state = parseIntegerList(file, line_idx);
+    // Convert the goal state to a unordered set
+    _goal_state = std::unordered_set<int>(goal_state.begin(), goal_state.end());
 }
 
 void HtnInstance::extractTasksNames(std::ifstream &file, int &line_idx)
@@ -366,6 +384,7 @@ void HtnInstance::extractMethods(std::ifstream &file, int &line_idx)
             ordering_constains.emplace_back(value1, value2);
         }
         ++line_idx;
+
         sortSubtasks(subtasks_ids, ordering_constains);
 
         _methods.emplace_back(method_id, method_name, abstract_task_id, subtasks_ids);
@@ -439,28 +458,43 @@ Parameters &HtnInstance::getParams() const
     return _params;
 }
 
-const AbstractTask &HtnInstance::getAbstractTaskById(int task_id) const
+
+const Action &HtnInstance::getBlankAction() const
 {
-    return _abstr_tasks[task_id - _actions.size()];
+    return *_blankAction;
 }
+
 
 const bool HtnInstance::isAbstractTask(int task_id) const
 {
     return task_id >= _actions.size();
 }
 
+const AbstractTask &HtnInstance::getAbstractTaskById(int task_id) const
+{
+    assert(task_id >= _actions.size() && task_id < _abstr_tasks.size() + _actions.size() || Log::e("Error: Task ID %d is out of range.\n", task_id));
+    return _abstr_tasks[task_id - _actions.size()];
+}
+
 const Action &HtnInstance::getActionById(int action_id) const
 {
+    if (action_id == _blankAction->getId())
+    {
+        return getBlankAction();
+    }
+    assert(action_id >= 0 && action_id < _actions.size() || Log::e("Error: Action ID %d is out of range.\n", action_id));
     return _actions[action_id];
 }
 
 const Method &HtnInstance::getMethodById(int method_id) const
 {
+    assert(method_id >= 0 && method_id < _methods.size() || Log::e("Error: Method ID %d is out of range.\n", method_id));
     return _methods[method_id];
 }
 
 const Predicate &HtnInstance::getPredicateById(int pred_id) const
 {
+    assert(pred_id >= 0 && pred_id < _predicates.size() || Log::e("Error: Predicate ID %d is out of range.\n", pred_id));
     return _predicates[pred_id];
 }
 
@@ -469,22 +503,37 @@ const AbstractTask &HtnInstance::getRootTask() const
     return _abstr_tasks[_root_task_idx - _actions.size()];
 }
 
+const bool HtnInstance::isRootTask(const AbstractTask &task) const
+{
+    return task.getId() == _root_task_idx;
+}
+
 const std::vector<Predicate> &HtnInstance::getPredicates() const
 {
     return _predicates;
 }
 
-Action HtnInstance::getGoalAction() const
-{
-    return Action(/*id=*/_id_goal_action, /*preconditions=*/_goal_state, /*pos_effs=*/{}, /*neg_effs=*/{});
-}
+// Action HtnInstance::getGoalAction() const
+// {
+//     return Action(/*id=*/_id_goal_action, /*preconditions=*/_goal_state, /*pos_effs=*/{}, /*neg_effs=*/{});
+// }
 
-const std::vector<int> &HtnInstance::getInitState() const
+const std::unordered_set<int> &HtnInstance::getInitState() const
 {
     return _init_state;
+}
+
+const std::unordered_set<int> &HtnInstance::getGoalState() const
+{
+    return _goal_state;
 }
 
 const int HtnInstance::getNumPredicates() const
 {
     return _predicates.size();
+}
+
+const std::vector<int> &HtnInstance::getFactVarsGoal() const
+{
+    return _all_fact_vars_goal;
 }

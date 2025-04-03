@@ -49,12 +49,14 @@ void Parameters::init(int argc, char **argv)
 
 void Parameters::setDefaults()
 {
-    setParam("cleanup", "0"); // clean up before exit?
+    setParam("cleanup", "1"); // clean up before exit?
     setParam("co", "1");      // colored output
     setParam("s", "0");       // random seed
     setParam("v", "2");       // verbosity
     setParam("vp", "0");      // Verify plan
     setParam("wf", "0");      // output formula to f.cnf
+    setParam("wp", "0");      // output plan to plan.txt
+    setParam("pvn", "0");      // Print variable names
 }
 
 void Parameters::printUsage()
