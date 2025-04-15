@@ -13,6 +13,12 @@ private:
 
     void encodeInitialState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &init_state);
     void encodeGoalState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &goal_state);
+    void encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by);
+    void encodeMethods(const std::unordered_map<int, int> &map_method_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars);
+    void encodePrimitivenessOps(const std::unordered_map<int, int> &map_action_idx_to_var, const std::unordered_map<int, int> &map_method_idx_to_var, const int &prim_var);
+    void encodeFrameAxioms(const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars, const int &prim_var, const std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, const std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by);
+    void encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_to_var);
+    void encodeHierarchy(const PdtNode *cur_node, const PdtNode *parentNode);
 
 public:
     Encoding(HtnInstance &htn) : _htn(htn), _sat(htn.getParams()) {}
