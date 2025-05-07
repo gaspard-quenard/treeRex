@@ -16,7 +16,11 @@
 
 extern "C"
 {
-#include "sat/ipasir.h"
+    #ifdef USE_SMT
+    #include "sat/ipasir_smt.h"
+    #else
+    #include "sat/ipasir.h"
+    #endif
 }
 
 class SatInterface
@@ -38,6 +42,11 @@ private:
 public:
     SatInterface(Parameters &params) : _params(params), _stats(Statistics::getInstance()), _print_formula(params.isNonzero("wf"))
     {
+        #ifdef USE_SMT
+        printf("Using SMT solver\n");
+        #else
+        printf("Using SAT solver\n");
+        #endif
 
         _solver = ipasir_init();
         ipasir_set_seed(_solver, params.getIntParam("s"));
@@ -234,6 +243,11 @@ public:
         ffile.close();
 
     }
+
+    #ifdef USE_SMT
+    // IMPLEMENT ALL THE SMT FUNCTIONS THERE
+
+    #endif
 
     ~SatInterface()
     {

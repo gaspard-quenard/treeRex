@@ -48,6 +48,11 @@ if("${IPASIRSOLVER}" STREQUAL "uwrmaxsat")
     add_compile_definitions(USE_IPAMIR)
 endif()
 
+# If using z3 solver, Indicate that we use a SMT solver
+if("${IPASIRSOLVER}" STREQUAL "z3")
+    add_compile_definitions(USE_SMT)
+endif()
+
 # Source files (without main.cpp)
 
 set(BASE_SOURCES
