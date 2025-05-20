@@ -17,7 +17,6 @@ if [ ! -f libz3.so ]; then
         git clean -f
     fi
 
-    cd z3
     python3 scripts/mk_make.py
     cd build
     make
