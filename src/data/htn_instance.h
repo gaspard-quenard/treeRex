@@ -22,6 +22,7 @@ private:
     std::vector<Method> _methods;
     int _id_goal_action;
     Action *_blankAction;
+    const bool _num_domain = _params.isNonzero("numerical");
 
     int _root_task_idx;
     std::unordered_set<int> _init_state;

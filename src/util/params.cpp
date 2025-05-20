@@ -57,6 +57,7 @@ void Parameters::setDefaults()
     setParam("wf", "0");      // output formula to f.cnf
     setParam("wp", "0");      // output plan to plan.txt
     setParam("pvn", "0");      // Print variable names
+    setParam("numerical", "0");      // Print variable names
 }
 
 void Parameters::printUsage()

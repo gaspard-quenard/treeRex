@@ -17,13 +17,34 @@
 
 HtnInstance::HtnInstance(Parameters &params) : _params(params)
 {
-    auto parsed_problem = parseProblem(params.getDomainFilename(), params.getProblemFilename());
-    if (!parsed_problem)
-        return;
 
-    auto grounded_problem = groundProblem(*parsed_problem);
-    if (!grounded_problem)
-        return;
+    std::optional<std::string> grounded_problem;
+
+    if (_num_domain)
+    {
+        Log::i("Numerical domain detected. Parse and ground the problem using pddl4j.\n");
+        std::filesystem::path java_bin = getProjectRootDir() / "lib" / "pddl4j" / "pddl4j-4.0.0.jar";
+        std::filesystem::path java_class_folder = getProjectRootDir() / "lib" / "pddl4j" / "classes";
+        std::string java_class = "fr.uga.pddl4j.examples.GroundProblemExample";
+        std::string output_filepath = (getProblemProcessingDir() / "problem.grounded").string();
+
+        std::string command = "java -cp " + java_class_folder.string() + ":"  + java_bin.string() + " " + java_class + " " + params.getDomainFilename() + " " + params.getProblemFilename() + " " + output_filepath;
+
+        if (runCommand(command, "Parsing the domain and problem files failed.") != 0)
+            return;
+
+        grounded_problem = output_filepath;
+    }
+    else
+    {
+        auto parsed_problem = parseProblem(params.getDomainFilename(), params.getProblemFilename());
+        if (!parsed_problem)
+            return;
+
+        grounded_problem = groundProblem(*parsed_problem);
+        if (!grounded_problem)
+            return;
+    }
 
     loadGroundedProblem(*grounded_problem);
 }
