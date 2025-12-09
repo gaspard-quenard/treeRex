@@ -10,6 +10,8 @@ TreeRex use both [pandaPigrounder](https://github.com/panda-planner-dev/pandaPIg
 - `bison` (versions 3.5.1 and 3.7.2 are known to work)
 - `zip`
 - `gengetopt` (tested with version 2.23)
+- `libz-dev`
+- `cmake`
 
 
 You can build TreeRex like this:
