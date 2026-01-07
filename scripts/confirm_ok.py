@@ -79,7 +79,7 @@ Optimal_size_plan_per_benchmark = {
 }
 
 
-planner_config = "./treerex {domain_path} {problem_path}"
+planner_config = "./treerex {domain_path} {problem_path} -mutex"
 
 
 if __name__ == "__main__":

@@ -34,6 +34,30 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
         // Encode the hierarchy of each ops
         encodeHierarchy(node, parent_node);
     }
+
+    if (_encode_mutexes)
+    {
+        Log::i("  Encoding Mutexes\n");
+        // Encode mutexes for all time steps
+        for (int i = 0; i < leaf_nodes.size(); ++i)
+        {
+            const std::vector<int> &current_fact_vars = leaf_nodes[i]->getFactVariables();
+            // Encode all groups
+            for (const std::vector<int> &group : _htn.getMutex().getMutexGroups())
+            {
+
+                std::vector<int> group_vars;
+                for (int pred_idx : group)
+                {
+                    // Get the variable for this predicate at this time step
+                    int var = current_fact_vars[pred_idx];
+                    group_vars.push_back(var);
+                }
+                // Encode the at-most-one constraint for this group
+                encodeAtMostOne(group_vars);
+            }
+        }
+    }
 }
 
 void Encoding::initalEncode(PdtNode *root_node)
@@ -167,6 +191,18 @@ void Encoding::encodeFrameAxioms(const std::vector<int> &current_fact_vars, cons
     }
 }
 
+void Encoding::encodeAtMostOne(const std::vector<int> &vars)
+{
+    // Encode the at most one with the basic encoding
+    for (int i = 0; i < vars.size(); i++)
+    {
+        for (int j = i + 1; j < vars.size(); j++)
+        {
+            _sat.addClause(-vars[i], -vars[j]);
+        }
+    }
+}
+
 void Encoding::encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_to_var)
 {
     std::vector<int> op_vars;
@@ -176,13 +212,7 @@ void Encoding::encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_
     }
 
     // Encode the at most one with the basic encoding
-    for (int i = 0; i < op_vars.size(); i++)
-    {
-        for (int j = i + 1; j < op_vars.size(); j++)
-        {
-            _sat.addClause(-op_vars[i], -op_vars[j]);
-        }
-    }
+    encodeAtMostOne(op_vars);
 }
 
 void Encoding::encodeHierarchy(const PdtNode *cur_node, const PdtNode *parent_node)

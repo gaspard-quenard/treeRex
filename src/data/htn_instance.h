@@ -9,12 +9,16 @@
 #include "data/action.h"
 #include "data/method.h"
 #include "data/abstract_task.h"
+#include "data/mutex.h"
 #include "util/params.h"
+
 
 class HtnInstance
 {
 private:
     Parameters &_params;
+
+    Mutex _mutex;
 
     std::vector<Predicate> _predicates;
     std::vector<Action> _actions;
@@ -77,6 +81,14 @@ private:
      * @param line_idx The index of the line to start extraction from.
      */
     void extractPredicates(std::ifstream &file, int &line_idx);
+
+    /**
+     * Extract mutexes from the grounded problem and store them in `_mutex`.
+     *
+     * @param file The input file stream.
+     * @param line_idx The index of the line to start extraction from.
+     */
+    void extractMutexes(std::ifstream &file, int &line_idx);
 
     /**
      * Extract actions from the grounded problem and store them in `_actions`.
@@ -150,6 +162,7 @@ public:
     const std::unordered_set<int> &getGoalState() const;
     const int getNumPredicates() const;
     const std::vector<int> &getFactVarsGoal() const;
+    Mutex& getMutex() { return _mutex; }
 };
 
 #endif // HTN_INSTANCE_H

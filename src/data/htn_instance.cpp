@@ -50,8 +50,12 @@ std::optional<std::string> HtnInstance::groundProblem(const std::string &parsed_
 
     std::filesystem::path grounder_path = getProjectRootDir() / "lib" / "pandaPIgrounder";
     std::string output_filepath = (getProblemProcessingDir() / "problem.grounded").string();
-    // std::string command = grounder_path.string() + " --write-full-methods-name " + parsed_problem_filepath + " " + output_filepath;
-    std::string command = grounder_path.string() + " " + parsed_problem_filepath + " " + output_filepath;
+    std::string options = "";
+    if (_params.isNonzero("mutex"))
+    {
+        options += "--invariants";
+    }
+    std::string command = grounder_path.string() + " " + options + " " + parsed_problem_filepath + " " + output_filepath;
 
     if (runCommand(command, "Grounding the parsed problem failed.") != 0)
         return std::nullopt;
@@ -76,6 +80,10 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
 
     int line_idx = 0;
     extractPredicates(file, line_idx);
+    if (_params.isNonzero("mutex"))
+    {
+        extractMutexes(file, line_idx);
+    }
     extractActions(file, line_idx);
     extractInitGoalStates(file, line_idx);
     extractTasksNames(file, line_idx);
@@ -176,6 +184,66 @@ void HtnInstance::extractPredicates(std::ifstream &file, int &line_idx)
         bool is_positive = line[0] == '+';
         _predicates.emplace_back(pred_id++, is_positive, line);
         ++line_idx;
+    }
+}
+
+void HtnInstance::extractMutexes(std::ifstream &file, int &line_idx)
+{
+    skipUntil(file, ";; Mutex Groups", line_idx);
+
+    std::string line;
+
+    // Ignore the first line
+    std::getline(file, line);
+    ++line_idx;
+
+    // Each mutex group is in the form:
+    // <idx_first_predicate_in_group> <idx_last_predicate_in_group> <name>
+    while (std::getline(file, line) && !line.empty())
+    {
+        std::istringstream iss(line);
+        int idx_first_predicate, idx_last_predicate;
+        iss >> idx_first_predicate >> idx_last_predicate;
+        if (idx_first_predicate == idx_last_predicate)
+        {
+            continue; // Skip empty mutex groups
+        }
+        std::vector<int> mutex_group;
+        mutex_group.reserve(idx_last_predicate - idx_first_predicate + 1);
+        for (int i = idx_first_predicate; i <= idx_last_predicate; ++i)
+        {
+            mutex_group.push_back(i);
+        }
+        _mutex.addMutexGroup(mutex_group);
+        ++line_idx;
+    }
+
+    Log::i("Line: %s\n", line.c_str());
+
+    skipUntil(file, ";; further strict Mutex Groups", line_idx);
+
+    // Ignore the first line
+    std::getline(file, line);
+    ++line_idx;
+
+    // Here we have a list if integers, each integer is a mutex group
+    std::vector<int> mutex_group = parseIntegerList(file, line_idx);
+    while (mutex_group.size() > 1)
+    {
+        _mutex.addMutexGroup(mutex_group);
+        mutex_group = parseIntegerList(file, line_idx);
+    }
+
+    skipUntil(file, ";; further non strict Mutex Groups", line_idx);
+    // Ignore the first line
+    std::getline(file, line);
+    ++line_idx;
+
+    mutex_group = parseIntegerList(file, line_idx);
+    while (mutex_group.size() > 1)
+    {
+        _mutex.addMutexGroup(mutex_group);
+        mutex_group = parseIntegerList(file, line_idx);
     }
 }
 
