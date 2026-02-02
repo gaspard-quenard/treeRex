@@ -625,17 +625,20 @@ std::vector<DagNode *> DagNode::pruneMethods(const std::vector<DagNode *> &nodes
         DagNode *n = nodes[i];
         if (!n || n->isMethod())
             continue;
-        // A non-method leaf in the *non-method induced* subgraph.
-        bool has_non_method_succ = false;
+        // A real leaf must have no successors in the induced subgraph at all.
+        // IMPORTANT: If a node's only successors are METHOD nodes, then after pruning
+        // methods it becomes a dangling endpoint. Treating it as a leaf would keep it
+        // active and allows SAT to select it as a trivial (but meaningless) plan step.
+        bool has_any_succ = false;
         for (DagNode *succ : n->getNext())
         {
-            if (succ && !succ->isMethod() && in_induced(succ) >= 0)
+            if (succ && in_induced(succ) >= 0)
             {
-                has_non_method_succ = true;
+                has_any_succ = true;
                 break;
             }
         }
-        if (!has_non_method_succ)
+        if (!has_any_succ)
         {
             bwd[i] = 1;
             q.push(i);
