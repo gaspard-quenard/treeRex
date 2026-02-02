@@ -4,12 +4,15 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <queue>
+#include <assert.h>
 #include <unordered_map>
 
 #include "util/log.h"
 #include "util/command_utils.h"
 #include "util/project_utils.h"
 #include "util/names.h"
+#include "sat/variable_provider.h"
 
 HtnInstance::HtnInstance(Parameters &params) : _params(params)
 {
@@ -22,13 +25,63 @@ HtnInstance::HtnInstance(Parameters &params) : _params(params)
         return;
 
     loadGroundedProblem(*grounded_problem);
+
+    if (_params.isNonzero("precsEffs"))
+    {
+        bool res = getPrecsAndEffsMethods(*grounded_problem);
+
+        // if (_params.isNonzero("mutex"))
+        // {
+        //     int num_removed = 0;
+        //     Log::i("Remove possible positive effects that are mutex with the certified effects of the methods\n");
+        //     for (int i = 0; i < _methods.size(); i++) {
+        //         Method &method = _methods[i];
+        //         const std::vector<int> &positive_effects = method.getPosEffsIdx();
+        //         const std::vector<int> &negative_effects = method.getNegEffsIdx();
+        //         const std::vector<int> &possible_positive_effects = method.getPossPosEffsIdx();
+        //         const std::vector<int> &possible_negative_effects = method.getPossNegEffsIdx();
+
+        //         // Remove the possible positive effects that are mutex with the certified effects
+        //         for (int pos_eff_idx: positive_effects)
+        //         {
+        //             // Get all the mutex groups that contain the effect
+        //             const std::unordered_set<int> &mutex_groups = _mutex.getMutexGroupsOfPred(pos_eff_idx);
+        //             for (int mutex_group_idx: mutex_groups)
+        //             {
+        //                 // Get the mutex group
+        //                 const std::vector<int> &mutex_group = _mutex.getMutexGroup(mutex_group_idx);
+        //                 // Check if the possible positive effect is in the mutex group
+        //                 for (int j = 0; j < possible_positive_effects.size(); j++)
+        //                 {
+        //                     // If it is the same effect, ignore it
+        //                     if (possible_positive_effects[j] == pos_eff_idx)
+        //                         continue;
+
+        //                     if (std::find(mutex_group.begin(), mutex_group.end(), possible_positive_effects[j]) != mutex_group.end())
+        //                     {
+        //                         Log::i("Could remove the possible positive effect %s of method %s because it is mutex with the effect %s\n", TOSTR(getPredicateById(possible_positive_effects[j])), TOSTR(method), TOSTR(getPredicateById(pos_eff_idx)));
+        //                         num_removed++;
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     Log::i("Could remove %d possible positive effects that are mutex with the certified effects of the methods\n", num_removed);
+        // }
+    }
 }
 
 std::optional<std::string> HtnInstance::parseProblem(const std::string &domain_filepath, const std::string &problem_filepath)
 {
     std::filesystem::path parser_path = getProjectRootDir() / "lib" / "pandaPIparser";
     std::string output_filepath = (getProblemProcessingDir() / "problem.parsed").string();
-    std::string command = parser_path.string() + " --no-split-parameters " + domain_filepath + " " + problem_filepath + " " + output_filepath;
+    std::string options = "";
+    if (_params.isNonzero("nsp"))
+    {
+        options += "--no-split-parameters ";
+    }
+    std::string command = parser_path.string() + " " + options + domain_filepath + " " + problem_filepath + " " + output_filepath;
+    Log::i("Command: %s\n", command.c_str());
 
     if (runCommand(command, "Parsing the domain and problem files failed.") != 0)
         return std::nullopt;
@@ -46,7 +99,21 @@ std::optional<std::string> HtnInstance::groundProblem(const std::string &parsed_
 
     std::filesystem::path grounder_path = getProjectRootDir() / "lib" / "pandaPIgrounder";
     std::string output_filepath = (getProblemProcessingDir() / "problem.grounded").string();
-    std::string command = grounder_path.string() + " --write-full-methods-name " + parsed_problem_filepath + " " + output_filepath;
+    // std::string command = grounder_path.string() + " --write-full-methods-name " + parsed_problem_filepath + " " + output_filepath;
+    std::string options = "";
+    if (_params.isNonzero("mutex"))
+    {
+        options += "--invariants";
+    }
+
+    // When running speed benchmarks or when requested, silence the grounder.
+    // This reduces overhead from large amounts of console output and does not
+    // change grounding semantics.
+    if (_params.isNonzero("optimized_expansion"))
+    {
+        options += " --quiet";
+    }
+    std::string command = grounder_path.string() + " " + options + " " + parsed_problem_filepath + " " + output_filepath;
 
     if (runCommand(command, "Grounding the parsed problem failed.") != 0)
         return std::nullopt;
@@ -71,16 +138,55 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
 
     int line_idx = 0;
     extractPredicates(file, line_idx);
+    if (_params.isNonzero("mutex"))
+    {
+        extractMutexes(file, line_idx);
+    }
     extractActions(file, line_idx);
     extractInitGoalStates(file, line_idx);
     extractTasksNames(file, line_idx);
     extractInitRootTaskIdx(file, line_idx);
     extractMethods(file, line_idx);
-    
-    // Initialize the goal action
-    _id_goal_action = _actions.size() + _abstr_tasks.size();
 
-    Names::init(_predicates, _actions, _abstr_tasks, _methods);
+    // Initialize the blank action
+    _blankAction = new Action(-1, {}, {}, {});
+    _blankAction->addName("blank");
+
+    // Initialize the goal action
+    // _id_goal_action = _actions.size() + _abstr_tasks.size();
+    _id_init_action = -2;
+    _id_goal_action = -3;
+
+    _goalAction = new Action(_id_goal_action, std::vector<int>(_goal_state.begin(), _goal_state.end()), {}, {});
+
+    // Initialize all the facts vars for the goal state
+    for (int i = 0; i < _predicates.size(); i++)
+    {
+        _all_fact_vars_goal.push_back(VariableProvider::nextVar());
+    }
+
+    if (_params.isNonzero("removeMethodPrecAction"))
+    {
+        Log::i("Removing the first subtask of each method if it starts with __method_precondition_\n");
+        // Iterate over all the method and remove the first subtask if it starts with __method_prec__
+        for (int i = 0; i < _methods.size(); i++)
+        {
+            Method &method = _methods[i];
+            if (method.getSubtasksIdx().size() > 0)
+            {
+                int first_subtask_id = method.getSubtasksIdx()[0];
+                if (!isAbstractTask(first_subtask_id) &&
+                    _actions[first_subtask_id].getName().find("__method_precondition_") == 0)
+                {
+                    _methods_to_precondition_action[i] = first_subtask_id;
+                    // Remove the first subtask
+                    method.removeFirstSubtask();
+                }
+            }
+        }
+    }
+
+    Names::init(_predicates, _actions, _abstr_tasks, _methods, _blankAction);
 
     // To debug, print all structures
     // Log::i("Predicates:\n");
@@ -112,6 +218,11 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
     // for (int pred_id : _goal_state)
     // {
     //     Log::i("%s\n", TOSTR(_predicates[pred_id]));
+    // }
+    // if (_params.isNonzero("mutex"))
+    // {
+    //     Log::i("Mutex groups:\n");
+    //     _mutex.printMutexGroups();
     // }
 }
 
@@ -161,6 +272,78 @@ void HtnInstance::extractPredicates(std::ifstream &file, int &line_idx)
         bool is_positive = line[0] == '+';
         _predicates.emplace_back(pred_id++, is_positive, line);
         ++line_idx;
+    }
+}
+
+void HtnInstance::extractMutexes(std::ifstream &file, int &line_idx)
+{
+    skipUntil(file, ";; Mutex Groups", line_idx);
+
+    std::string line;
+
+    // Ignore the first line
+    std::getline(file, line);
+    ++line_idx;
+
+    // Each mutex group is in the form:
+    // <idx_first_predicate_in_group> <idx_last_predicate_in_group> <name>
+    while (std::getline(file, line) && !line.empty())
+    {
+        std::istringstream iss(line);
+        int idx_first_predicate, idx_last_predicate;
+        iss >> idx_first_predicate >> idx_last_predicate;
+        if (idx_first_predicate == idx_last_predicate)
+        {
+            continue; // Skip empty mutex groups
+        }
+        std::vector<int> mutex_group;
+        mutex_group.reserve(idx_last_predicate - idx_first_predicate + 1);
+        for (int i = idx_first_predicate; i <= idx_last_predicate; ++i)
+        {
+            mutex_group.push_back(i);
+        }
+        _mutex.addMutexGroup(mutex_group);
+        ++line_idx;
+    }
+
+    Log::i("Line: %s\n", line.c_str());
+
+    skipUntil(file, ";; further strict Mutex Groups", line_idx);
+
+    // Ignore the first line
+    std::getline(file, line);
+    ++line_idx;
+
+    // Here we have a list if integers, each integer is a mutex group
+    std::vector<int> mutex_group = parseIntegerList(file, line_idx);
+    while (mutex_group.size() > 1)
+    {
+        // std::unordered_set<int> mutex_group_set;
+        // for (int i = 0; i < mutex_group.size(); ++i)
+        // {
+        //     mutex_group_set.insert(mutex_group[i]);
+        // }
+        // _mutex.addMutexGroup(mutex_group_set);
+        _mutex.addMutexGroup(mutex_group);
+        mutex_group = parseIntegerList(file, line_idx);
+    }
+
+    skipUntil(file, ";; further non strict Mutex Groups", line_idx);
+    // Ignore the first line
+    std::getline(file, line);
+    ++line_idx;
+
+    mutex_group = parseIntegerList(file, line_idx);
+    while (mutex_group.size() > 1)
+    {
+        // std::unordered_set<int> mutex_group_set;
+        // for (int i = 0; i < mutex_group.size(); ++i)
+        // {
+        //     mutex_group_set.insert(mutex_group[i]);
+        // }
+        // _mutex.addMutexGroup(mutex_group_set);
+        _mutex.addMutexGroup(mutex_group);
+        mutex_group = parseIntegerList(file, line_idx);
     }
 }
 
@@ -257,10 +440,14 @@ void HtnInstance::extractInitGoalStates(std::ifstream &file, int &line_idx)
        Any state feature that does not occur in this line is false in the initial state
      */
     skipUntil(file, ";; initial state", line_idx);
-    _init_state = parseIntegerList(file, line_idx);
+    std::vector<int> init_state = parseIntegerList(file, line_idx);
+    // Convert the initial state to a unordered set
+    _init_state = std::unordered_set<int>(init_state.begin(), init_state.end());
 
     skipUntil(file, ";; goal", line_idx);
-    _goal_state = parseIntegerList(file, line_idx);
+    std::vector<int> goal_state = parseIntegerList(file, line_idx);
+    // Convert the goal state to a unordered set
+    _goal_state = std::unordered_set<int>(goal_state.begin(), goal_state.end());
 }
 
 void HtnInstance::extractTasksNames(std::ifstream &file, int &line_idx)
@@ -366,6 +553,7 @@ void HtnInstance::extractMethods(std::ifstream &file, int &line_idx)
             ordering_constains.emplace_back(value1, value2);
         }
         ++line_idx;
+
         sortSubtasks(subtasks_ids, ordering_constains);
 
         _methods.emplace_back(method_id, method_name, abstract_task_id, subtasks_ids);
@@ -376,81 +564,227 @@ void HtnInstance::extractMethods(std::ifstream &file, int &line_idx)
     }
 }
 
-void HtnInstance::sortSubtasks(std::vector<int> &subtasks_id, std::vector<std::pair<int, int>> &ordering_constains)
+void HtnInstance::sortSubtasks(std::vector<int> &subtasks_id, std::vector<std::pair<int, int>> &ordering_constraints)
 {
-    // Create a map to store the index of each subtask
-    std::unordered_map<int, int> subtasks_idx;
-    for (int i = 0; i < subtasks_id.size(); i++)
+    int n = subtasks_id.size();
+    // Build a graph using indices as nodes.
+    std::vector<std::vector<int>> graph(n);
+    std::vector<int> indegree(n, 0);
+
+    // Build the graph based on ordering constraints (which are indices).
+    for (const auto &constraint : ordering_constraints)
     {
-        subtasks_idx[subtasks_id[i]] = i;
+        int u = constraint.first;  // index of the first subtask
+        int v = constraint.second; // index of the second subtask
+
+        // Check that indices are in range.
+        if (u < 0 || u >= n || v < 0 || v >= n)
+        {
+            throw std::runtime_error("Ordering constraint index out of range");
+        }
+        graph[u].push_back(v);
+        indegree[v]++;
     }
 
-    // Sort the subtasks according to the ordering constraints
-    for (int i = 0; i < ordering_constains.size(); i++)
+    // Use a queue for the topological sort.
+    std::queue<int> q;
+    for (int i = 0; i < n; i++)
     {
-        int subtask1_id = ordering_constains[i].first;
-        int subtask2_id = ordering_constains[i].second;
-        int subtask1_idx = subtasks_idx[subtask1_id];
-        int subtask2_idx = subtasks_idx[subtask2_id];
-        if (subtask1_idx > subtask2_idx)
+        if (indegree[i] == 0)
+            q.push(i);
+    }
+
+    // Kahn's algorithm for topological sorting.
+    std::vector<int> sortedIndices;
+    while (!q.empty())
+    {
+        int u = q.front();
+        q.pop();
+        sortedIndices.push_back(u);
+        for (int v : graph[u])
         {
-            // Swap the subtasks
-            int tmp = subtasks_id[subtask1_idx];
-            subtasks_id[subtask1_idx] = subtasks_id[subtask2_idx];
-            subtasks_id[subtask2_idx] = tmp;
-            // Update the index of the subtasks
-            subtasks_idx[subtask1_id] = subtask2_idx;
-            subtasks_idx[subtask2_id] = subtask1_idx;
+            if (--indegree[v] == 0)
+                q.push(v);
         }
     }
+
+    if (sortedIndices.size() != n)
+    {
+        throw std::runtime_error("Cycle detected in ordering constraints");
+    }
+
+    // Build the sorted subtasks list according to the topologically sorted indices.
+    std::vector<int> sortedSubtasks(n);
+    for (int i = 0; i < n; i++)
+    {
+        sortedSubtasks[i] = subtasks_id[sortedIndices[i]];
+    }
+    subtasks_id = sortedSubtasks;
 }
 
-Parameters& HtnInstance::getParams() const
+bool HtnInstance::getPrecsAndEffsMethods(std::string &grounded_problem_filepath)
+{
+    std::filesystem::path planner_path = getProjectRootDir() / "lib" / "pandaPIengine";
+    std::string output_filepath = (getProblemProcessingDir() / "precs_effs_methods.txt").string();
+
+    std::string options = "--writePrecsAndEffsMethods=" + output_filepath;
+    std::string command = planner_path.string() + " " + options + " " + grounded_problem_filepath;
+
+    if (runCommand(command, "Getting preconditions and effects of methods failed.") != 0)
+        return false;
+
+    // Read the output file and extract the preconditions and effects
+    Log::i("Reading the preconditions and effects of methods from %s\n", output_filepath.c_str());
+    std::ifstream file(output_filepath);
+    if (!file)
+    {
+        Log::e("Error: Unable to open the preconditions and effects file.\n");
+        return false;
+    }
+    std::string line;
+    // Format of the file is in the form:
+    // Each method is described by a block of $6$ consecutive lines.
+    // The first line contains the method ID.
+    // The next fifth lines contain a space-separated list of integers finishing with -1.
+    // The second line contains the preconditions of the method.
+    // The third line contains the possible positive effects of the method.
+    // The fourth line contains the possible negative effects of the method.
+    // The fifth line contains the positive effects of the method.
+    // The sixth line contains the negative effects of the method.
+
+    int line_idx = 0;
+    while (std::getline(file, line) && !line.empty())
+    {
+        int method_id = std::stoi(line);
+        std::vector<int> preconditions = parseIntegerList(file, line_idx);
+        std::vector<int> possible_positive_effects = parseIntegerList(file, line_idx);
+        std::vector<int> possible_negative_effects = parseIntegerList(file, line_idx);
+        std::vector<int> positive_effects = parseIntegerList(file, line_idx);
+        std::vector<int> negative_effects = parseIntegerList(file, line_idx);
+
+        // Set the preconditions and effects of the method
+        _methods[method_id].setPreconditions(preconditions);
+        _methods[method_id].setPossiblePositiveEffects(possible_positive_effects);
+        _methods[method_id].setPossibleNegativeEffects(possible_negative_effects);
+        _methods[method_id].setPositiveEffects(positive_effects);
+        _methods[method_id].setNegativeEffects(negative_effects);
+
+        // Debug print
+        Log::i("For method %s (id: %d):\n", TOSTR(_methods[method_id]), method_id);
+        Log::i("Preconditions:\n");
+        for (int precondition : preconditions)
+        {
+            Log::i("  %s\n", TOSTR(_predicates[precondition]));
+        }
+        Log::i("Possible positive effects:\n");
+        for (int effect : possible_positive_effects)
+        {
+            Log::i("  %s\n", TOSTR(_predicates[effect]));
+        }
+        Log::i("Possible negative effects:\n");
+        for (int effect : possible_negative_effects)
+        {
+            Log::i("  %s\n", TOSTR(_predicates[effect]));
+        }
+        Log::i("Positive effects:\n");
+        for (int effect : positive_effects)
+        {
+            Log::i("  %s\n", TOSTR(_predicates[effect]));
+        }
+        Log::i("Negative effects:\n");
+        for (int effect : negative_effects)
+        {
+            Log::i("  %s\n", TOSTR(_predicates[effect]));
+        }
+        Log::i("\n");
+    }
+
+    return true;
+}
+
+Parameters &HtnInstance::getParams() const
 {
     return _params;
 }
 
-const AbstractTask& HtnInstance::getAbstractTaskById(int task_id) const
+const Action &HtnInstance::getBlankAction() const
 {
+    return *_blankAction;
+}
+
+const bool HtnInstance::isAbstractTask(int task_id) const
+{
+    return task_id >= _actions.size();
+}
+
+const AbstractTask &HtnInstance::getAbstractTaskById(int task_id) const
+{
+    assert(task_id >= _actions.size() && task_id < _abstr_tasks.size() + _actions.size() || Log::e("Error: Task ID %d is out of range.\n", task_id));
     return _abstr_tasks[task_id - _actions.size()];
 }
 
-const Action& HtnInstance::getActionById(int action_id) const
+const Action &HtnInstance::getActionById(int action_id) const
 {
+    if (action_id == _blankAction->getId())
+    {
+        return getBlankAction();
+    }
+    if (action_id == _id_goal_action)
+    {
+        return getGoalAction();
+    }
+    assert(action_id >= 0 && action_id < _actions.size() || Log::e("Error: Action ID %d is out of range.\n", action_id));
     return _actions[action_id];
 }
 
-const Method& HtnInstance::getMethodById(int method_id) const
+const Method &HtnInstance::getMethodById(int method_id) const
 {
+    assert(method_id >= 0 && method_id < _methods.size() || Log::e("Error: Method ID %d is out of range.\n", method_id));
     return _methods[method_id];
 }
 
-const Predicate& HtnInstance::getPredicateById(int pred_id) const
+const Predicate &HtnInstance::getPredicateById(int pred_id) const
 {
+    assert(pred_id >= 0 && pred_id < _predicates.size() || Log::e("Error: Predicate ID %d is out of range.\n", pred_id));
     return _predicates[pred_id];
 }
 
-const AbstractTask& HtnInstance::getRootTask() const
+const AbstractTask &HtnInstance::getRootTask() const
 {
     return _abstr_tasks[_root_task_idx - _actions.size()];
 }
 
-const std::vector<Predicate>& HtnInstance::getPredicates() const
+const bool HtnInstance::isRootTask(const AbstractTask &task) const
+{
+    return task.getId() == _root_task_idx;
+}
+
+const std::vector<Predicate> &HtnInstance::getPredicates() const
 {
     return _predicates;
 }
 
-Action HtnInstance::getGoalAction() const
+const Action &HtnInstance::getGoalAction() const
 {
-    return Action(/*id=*/_id_goal_action, /*preconditions=*/_goal_state, /*pos_effs=*/{}, /*neg_effs=*/{});
+    return *_goalAction;
 }
 
-const std::vector<int>& HtnInstance::getInitState() const
+const std::unordered_set<int> &HtnInstance::getInitState() const
 {
     return _init_state;
+}
+
+const std::unordered_set<int> &HtnInstance::getGoalState() const
+{
+    return _goal_state;
 }
 
 const int HtnInstance::getNumPredicates() const
 {
     return _predicates.size();
+}
+
+const std::vector<int> &HtnInstance::getFactVarsGoal() const
+{
+    return _all_fact_vars_goal;
 }

@@ -39,8 +39,13 @@ enum class TimingStage
     PLANNER,
     EXPANSION,
     ENCODING,
-    SOLVER,
+    ENCODING_ACTIONS,
+    ENCODING_METHODS,
+    ENCODING_FRAME_AXIOMS,
+    ENCODING_HIERARCHY,
+    ENCODING_PRIMITIVENESS,
     ENCODING_MUTEXES,
+    SOLVER,
     TOTAL
 };
 
@@ -186,6 +191,16 @@ public:
             return "time planner";
         case TimingStage::ENCODING_MUTEXES:
             return "time encoding mutexes";
+        case TimingStage::ENCODING_ACTIONS:
+            return "time encoding actions";
+        case TimingStage::ENCODING_METHODS:
+            return "time encoding methods";
+        case TimingStage::ENCODING_FRAME_AXIOMS:
+            return "time encoding frame axioms";
+        case TimingStage::ENCODING_HIERARCHY:
+            return "time encoding hierarchy";
+        case TimingStage::ENCODING_PRIMITIVENESS:
+            return "time encoding primitivness";
         case TimingStage::TOTAL:
             return "time total";
         default:

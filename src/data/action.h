@@ -24,6 +24,7 @@ public:
     const std::vector<int> &getPosEffsIdx() const { return _pos_effs_idx; }
     const std::vector<int> &getNegEffsIdx() const { return _neg_effs_idx; }
     const std::string getName() const { return _name; }
+    const int getId() const { return _id; }
 };
 
 #endif // ACTION_H

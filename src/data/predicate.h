@@ -14,11 +14,7 @@ private:
 public:
     Predicate(int id, bool positive, std::string name) : _id(id), _positive(positive), _name(name) {}
 
-    // Getter
-    const std::string getName() const
-    {
-        return _name;
-    }
+    const std::string getName() const { return _name; }
 };
 
 #endif // PREDICATE_H

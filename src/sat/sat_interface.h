@@ -12,6 +12,7 @@
 #include "util/params.h"
 #include "util/log.h"
 #include "util/statistics.h"
+#include "sat/variable_provider.h"
 
 extern "C"
 {
@@ -191,15 +192,63 @@ public:
         ipasir_set_learn(_solver, state, maxLength, learn);
     }
 
+    void reset()
+    {
+        // Reset the solver
+        ipasir_release(_solver);
+        _solver = ipasir_init();
+        ipasir_set_seed(_solver, _params.getIntParam("s"));
+        _last_assumptions.clear();
+        _stats._num_asmpts = 0;
+
+        if (_print_formula)
+            _out.open("formula.cnf");
+    }
+
     int solve()
     {
         _stats.beginTiming(TimingStage::SOLVER);
+        Log::i("Calling SAT solver with %zu clauses and %zu assumptions\n",
+               _stats._num_cls + _last_assumptions.size(),
+               _last_assumptions.size());
         int result = ipasir_solve(_solver);
         if (_stats._num_asmpts == 0)
             _last_assumptions.clear();
         _stats._num_asmpts = 0;
         _stats.endTiming(TimingStage::SOLVER);
         return result;
+    }
+
+    inline void print_formula(std::string filename) {
+
+        // std::cout << "WRITING FORMULA TO FILE: " << filename << std::endl;
+
+        // Create final formula file
+        std::ofstream ffile;
+        ffile.open(filename);
+
+        ffile << "p cnf " << VariableProvider::getMaxVar() << " " << (_stats._num_cls+_last_assumptions.size()) << "\n";
+
+        ffile << "c assumptions\n";
+        for (int asmpt : _last_assumptions) {
+            ffile << asmpt << " 0\n";
+        }
+        ffile << "c end assumptions\n";
+
+        // Write the content of _out to the file
+        _out.flush();
+        std::ifstream oldfile;
+        oldfile.open("formula.cnf");
+        std::string line;
+        while (std::getline(oldfile, line)) {
+            line = line + "\n";
+            ffile.write(line.c_str(), line.size());
+        }
+
+        // Finish
+        ffile.flush();
+        ffile.close();
+
     }
 
     ~SatInterface()

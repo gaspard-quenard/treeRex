@@ -49,12 +49,28 @@ void Parameters::init(int argc, char **argv)
 
 void Parameters::setDefaults()
 {
-    setParam("cleanup", "0"); // clean up before exit?
+    setParam("cleanup", "1"); // clean up before exit?
     setParam("co", "1");      // colored output
     setParam("s", "0");       // random seed
     setParam("v", "2");       // verbosity
     setParam("vp", "0");      // Verify plan
     setParam("wf", "0");      // output formula to f.cnf
+    setParam("wp", "0");      // output plan to plan.txt
+    setParam("pvn", "0");     // Print variable names
+    setParam("D", "20");     // Max depth for planning (0 previously meant "no search" for LTP)
+    setParam("mutex", "0");   // Use mutexes during the encoding
+    setParam("precsEffs", "0"); // Compute and use preconditions and effects of methods
+    setParam("reuseFactVars", "0"); // Reuse fact variables in the next position when possible. Need flag precsEffs to be set
+    setParam("removeMethodPrecAction", "0"); // Remove the special first subtask of the method which contains its preconditions and set instead the preconditions at the method level
+    setParam("computePossFactsAtEachPos", "0"); // Compute possible facts at each position and use them to prune op whose preconditions cannot be satisfied
+
+    setParam("sibylsat", "0"); // Use SibylSAT expansion method
+    setParam("nsp", "0"); // No split parameters
+    setParam("smartRepeatActions", "0"); // Smartly repeat actions in the plan
+    setParam("ltp", "0"); // Use Lifted Tree Path Planner (LTP)
+    setParam("compress_dag", "0"); // Use Lifted Tree Path Planner (LTP)
+    setParam("no_sat_encoding", "0"); // Do not use SAT encoding at all, jsut check the expansion
+    setParam("optimized_expansion", "0"); // Enable expansion-oriented optimizations (safe with SAT encoding)
 }
 
 void Parameters::printUsage()

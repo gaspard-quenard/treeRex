@@ -1,0 +1,549 @@
+#include "sat/encoding.h"
+#include "util/names.h"
+
+void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
+{
+    for (int i = 0; i < leaf_nodes.size(); ++i)
+    {
+        // Log::i("Encode node %d/%d: %s\n", i, leaf_nodes.size(), TOSTR(*leaf_nodes[i]));
+        PdtNode *node = leaf_nodes[i];
+
+        if (node->isNodeAlreadyEncoded())
+        {
+            // Log::w("Node %s is already encoded\n", node->getPositionString().c_str());
+            continue;
+        }
+
+        const PdtNode *parent_node = node->getParent();
+        PdtNode *right_node = i + 1 < leaf_nodes.size() ? leaf_nodes[i + 1] : nullptr;
+
+        const std::vector<int> &current_fact_vars = node->getFactVariables();
+        const std::vector<int> &next_fact_vars = i + 1 < leaf_nodes.size() ? leaf_nodes[i + 1]->getFactVariables() : _htn.getFactVarsGoal();
+
+        std::unordered_map<int, std::unordered_set<int>> positive_effs_can_be_implied_by;
+        std::unordered_map<int, std::unordered_set<int>> negative_effs_can_be_implied_by;
+
+        // Action implies precondition and effects, get as well all the predicates that can be changed and the actions that can change them
+        _stats.beginTiming(TimingStage::ENCODING_ACTIONS);
+        encodeActions(node->getActionAndVariables(), current_fact_vars, next_fact_vars, positive_effs_can_be_implied_by, negative_effs_can_be_implied_by);
+        _stats.endTiming(TimingStage::ENCODING_ACTIONS);
+
+        // Method implies precondition (Here method precondition is compiled into an action which is the first subtask of the method)
+        if (_encode_prec_and_effs_methods)
+        {
+            _stats.beginTiming(TimingStage::ENCODING_METHODS);
+            encodeMethods(node->getMethodAndVariables(), current_fact_vars, next_fact_vars, positive_effs_can_be_implied_by, negative_effs_can_be_implied_by);
+            _stats.endTiming(TimingStage::ENCODING_METHODS);
+
+            // Prevent a method from having the same method as parent or transitive parent
+            // Can only work if --no-split-parameters is used by the parser. Also, it should not be done on methods without parameters (that's the case if there is only one ground method with a name; 
+            // If multiple ground methods share the same name, then it means that this method name has at least one parameter)
+            // But adding this option slow down the parser and grounder... 
+            // Could maybe be done in a higher lever ? Meaning no recursive method if its subtasks choosen are the same as a parent method
+            // if (parent_node != nullptr)
+            // {
+
+            //     // TODO SHOULD ONLY BE DONE WITH RECURSIVE METHODS
+            //     for (int method_idx : node->getMethodsIdx())
+            //     {
+            //         // Log::i("Prevent method %s (%d) from having the same method as parent or transitive parent\n", TOSTR(_htn.getMethodById(method_idx)), method_idx);
+            //         // Collect identical_parents_var for this one method
+            //         std::unordered_set<int> identical_parents_var;
+
+            //         // Keep a "frontier" of method IDs that we are currently processing.
+            //         std::unordered_set<int> frontier;
+            //         frontier.insert(method_idx);
+
+            //         // Walk up the chain from the parent, grandparent, etc.
+            //         const PdtNode *cur = node;
+            //         const PdtNode *prev = parent_node;
+
+            //         while (prev != nullptr)
+            //         {
+            //             // Next "frontier" after seeing this level
+            //             std::unordered_set<int> next_frontier;
+
+            //             // For each method in the current frontier,
+            //             // get the parent methods from cur->getParentsOfMethod()
+            //             for (int m : frontier)
+            //             {
+            //                 const auto &parents = cur->getParentsOfMethodMap().at(m);
+            //                 for (int p : parents)
+            //                 {
+            //                     // If p is the *same* method_idx, record the parent's variable
+            //                     if (p == method_idx)
+            //                     {
+            //                         // Log::i("Method %s (%d) has the same method as parent or transitive parent\n", TOSTR(_htn.getMethodById(method_idx)), method_idx);
+            //                         identical_parents_var.insert(prev->getMethodAndVariables().at(p));
+            //                     }
+            //                     if (p != method_idx)
+            //                         next_frontier.insert(p);
+            //                 }
+            //             }
+
+            //             // Now move frontier forward
+            //             frontier = next_frontier;
+
+            //             // ...and climb to the next ancestor node
+            //             cur = prev;
+            //             prev = cur->getParent();
+            //         }
+
+            //         // Indicate that if this method is true, then all the identical parents must be false
+            //         int var_method = node->getMethodAndVariables().at(method_idx);
+            //         for (int parent_var : identical_parents_var)
+            //         {
+            //             // Log::i("Adding clause: %d %d\n", -var_method, -parent_var);
+            //             _sat.addClause(-var_method, -parent_var);
+            //         }
+            //     }
+            // }
+        }
+
+        // action implies prim, method implies not prim
+        encodePrimitivenessOps(node->getActionAndVariables(), node->getMethodAndVariables(), node->getPrimVariable());
+
+        // Encode frame axioms
+        
+        encodeFrameAxioms(node, right_node, positive_effs_can_be_implied_by, negative_effs_can_be_implied_by);
+
+        // At most one action or method is selected
+        // Done in the hierarchy instead because it is more efficient
+        // encodeAtMostOneOp(node->getActionAndVariables());
+        // encodeAtMostOneOp(node->getMethodAndVariables());
+
+        // Should not be necessary, but to test if it is better with a at least one op
+        // std::vector<int> all_ops;
+        // for (const auto &[action_idx, action_var] : node->getActionAndVariables())
+        // {
+        //     all_ops.push_back(action_var);
+        // }
+        // for (const auto &[method_idx, method_var] : node->getMethodAndVariables())
+        // {
+        //     all_ops.push_back(method_var);
+        // }
+        // // Encode at least one op
+        // for (int i = 0; i < all_ops.size(); ++i)
+        // {
+        //     _sat.appendClause(all_ops[i]);
+        // }
+        // _sat.endClause();
+
+        // Encode the hierarchy of each ops
+        _stats.beginTiming(TimingStage::ENCODING_HIERARCHY);
+        encodeHierarchy(node, parent_node);
+        _stats.endTiming(TimingStage::ENCODING_HIERARCHY);
+
+        node->setNodeEncoded();
+    }
+}
+
+void Encoding::initalEncode(PdtNode *root_node)
+{
+    // Encoding the initial state
+    encodeInitialState(root_node->getFactVariables(), _htn.getInitState());
+
+    // Encoding the goal state
+    encodeGoalState(_htn.getFactVarsGoal(), _htn.getGoalState());
+
+    // Root method must be true
+    if (root_node->getActionsIdx().size() != 0 || root_node->getMethodsIdx().size() != 1)
+    {
+        Log::e("Root node must have only one method and no action");
+        exit(1);
+    }
+
+    int var_root_method = root_node->getMethodAndVariables().begin()->second;
+    _sat.addClause(var_root_method);
+}
+
+void Encoding::encodeInitialState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &init_state)
+{
+    for (int i = 0; i < _htn.getNumPredicates(); i++)
+    {
+        if (init_state.find(i) != init_state.end())
+        {
+            _sat.addClause(all_pred_vars[i]);
+        }
+        else
+        {
+            _sat.addClause(-all_pred_vars[i]);
+        }
+    }
+}
+
+void Encoding::encodeGoalState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &goal_state)
+{
+    for (int i = 0; i < _htn.getNumPredicates(); i++)
+    {
+        if (goal_state.find(i) != goal_state.end())
+        {
+            _sat.addClause(all_pred_vars[i]);
+        }
+    }
+}
+
+void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+{
+    for (const auto &[action_idx, action_var] : map_action_idx_to_var)
+    {
+        const Action &action = _htn.getActionById(action_idx);
+
+        // Action implies preconditions
+        for (const int &precondition_idx : action.getPreconditionsIdx())
+        {
+            _sat.addClause(-action_var, current_fact_vars[precondition_idx]);
+        }
+
+        // Action implies effects
+        for (const int &pos_effect_idx : action.getPosEffsIdx())
+        {
+            _sat.addClause(-action_var, next_fact_vars[pos_effect_idx]);
+            positive_effs_can_be_implied_by[pos_effect_idx].insert(action_var);
+        }
+
+        for (const int &neg_effect_idx : action.getNegEffsIdx())
+        {
+            _sat.addClause(-action_var, -next_fact_vars[neg_effect_idx]);
+            negative_effs_can_be_implied_by[neg_effect_idx].insert(action_var);
+        }
+    }
+}
+
+void Encoding::encodeMethods(const std::unordered_map<int, int> &map_method_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+{
+    for (const auto &[method_idx, method_var] : map_method_idx_to_var)
+    {
+        const Method &method = _htn.getMethodById(method_idx);
+
+        // Method implies preconditions
+        for (const int &precondition_idx : method.getPreconditionsIdx())
+        {
+            _sat.addClause(-method_var, current_fact_vars[precondition_idx]);
+        }
+
+        // Action implies effects
+        for (const int &pos_effect_idx : method.getPosEffsIdx())
+        {
+            _sat.addClause(-method_var, next_fact_vars[pos_effect_idx]);
+            positive_effs_can_be_implied_by[pos_effect_idx].insert(method_var);
+        }
+
+        for (const int &neg_effect_idx : method.getNegEffsIdx())
+        {
+            _sat.addClause(-method_var, -next_fact_vars[neg_effect_idx]);
+            negative_effs_can_be_implied_by[neg_effect_idx].insert(method_var);
+        }
+
+        // All possible effects of the methods can be implied by the method
+        for (const int &poss_pos_effect_idx : method.getPossPosEffsIdx())
+        {
+            positive_effs_can_be_implied_by[poss_pos_effect_idx].insert(method_var);
+        }
+        for (const int &poss_neg_effect_idx : method.getPossNegEffsIdx())
+        {
+            negative_effs_can_be_implied_by[poss_neg_effect_idx].insert(method_var);
+        }
+    }
+}
+
+// void Encoding::encodeMethods(const std::unordered_map<int, int> &map_method_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars) {
+//     for (const auto &[method_idx, method_var] : map_method_idx_to_var)
+//     {
+//         const Method &method = _htn.getMethodById(method_idx);
+//         const std::vector<int> &preconditions_idx = method.();
+
+//         // Method implies preconditions
+//         for (int precondition_idx : preconditions_idx)
+//         {
+//             _sat.addClause(-method_var, current_fact_vars[precondition_idx]);
+//         }
+//     }
+// }
+
+void Encoding::encodePrimitivenessOps(const std::unordered_map<int, int> &map_action_idx_to_var, const std::unordered_map<int, int> &map_method_idx_to_var, const int &prim_var)
+{
+    _stats.beginTiming(TimingStage::ENCODING_PRIMITIVENESS);
+    // for (const auto &[action_idx, action_var] : map_action_idx_to_var)
+    // {
+    //     _sat.addClause(-action_var, prim_var);
+    // }
+    // std::vector<int> methods_vars;
+    for (const auto &[method_idx, method_var] : map_method_idx_to_var)
+    {
+        _sat.addClause(-method_var, -prim_var);
+        // methods_vars.push_back(method_var);
+    }
+    // if (methods_vars.size() > 0) {
+    // for (int method_var : methods_vars)
+    // {
+    //     _sat.appendClause(method_var);
+    // }
+    // _sat.appendClause(prim_var);
+    // _sat.endClause();
+    // }
+    _stats.endTiming(TimingStage::ENCODING_PRIMITIVENESS);
+}
+
+void Encoding::encodeFrameAxioms(PdtNode *cur_node, PdtNode *right_node, const std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, const std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+{
+    _stats.beginTiming(TimingStage::ENCODING_FRAME_AXIOMS);
+
+    const std::vector<int> &current_fact_vars = cur_node->getFactVariables();
+    const std::vector<int> &next_fact_vars = right_node != nullptr ? right_node->getFactVariables() : _htn.getFactVarsGoal();
+    const int &prim_var = cur_node->getPrimVariable();
+
+    std::unordered_set<int> mutexes_group_to_encode;
+
+    for (int i = 0; i < _htn.getNumPredicates(); i++)
+    {
+        const bool can_be_changed_by_negative_effects = negative_effs_can_be_implied_by.find(i) != negative_effs_can_be_implied_by.end();
+        const bool can_be_changed_by_positive_effects = positive_effs_can_be_implied_by.find(i) != positive_effs_can_be_implied_by.end();
+
+        if (_reuse_fact_vars && _encode_prec_and_effs_methods && !can_be_changed_by_negative_effects && !can_be_changed_by_positive_effects && right_node != nullptr)
+        {
+            // If the predicate cannot be changed, then, just use the same variable for the current and next state
+            right_node->updateFactVariable(i, current_fact_vars[i]);
+            continue;
+        }
+
+        if (_encode_mutexes)
+        {
+            // Since this predicate can be changed, indicate the invariant group
+            for (const int mutex_group_idx : _htn.getMutex().getMutexGroupsOfPred(i))
+            {
+                mutexes_group_to_encode.insert(mutex_group_idx);
+            }
+        }
+
+        // If this predicate was true and become false, then either there is a method responsable for this change (so the position is non primtiive)
+        // Or an action must be responsible for this change:
+        // pred__t and not pred__t+1 => (non prim or negative effect of an action)
+        // In CNF:
+        // (not pred__t or pred__t+1 or non_prim or action_1_with_negative_effect or action_2_with_negative_effect)
+        _sat.appendClause(-current_fact_vars[i], next_fact_vars[i]);
+        if (!_encode_prec_and_effs_methods)
+            _sat.appendClause(-prim_var);
+        if (can_be_changed_by_negative_effects)
+        {
+            for (int action_var : negative_effs_can_be_implied_by.at(i))
+            {
+                _sat.appendClause(action_var);
+            }
+        }
+        _sat.endClause();
+        // Do the same things if a predicate was false and become true
+        _sat.appendClause(current_fact_vars[i], -next_fact_vars[i]);
+        if (!_encode_prec_and_effs_methods)
+            _sat.appendClause(-prim_var);
+        if (can_be_changed_by_positive_effects)
+        {
+            for (int action_var : positive_effs_can_be_implied_by.at(i))
+            {
+                _sat.appendClause(action_var);
+            }
+        }
+        _sat.endClause();
+    }
+
+    _stats.endTiming(TimingStage::ENCODING_FRAME_AXIOMS);
+
+    // Encode the mutexes
+    _stats.beginTiming(TimingStage::ENCODING_MUTEXES);
+    encodeMutexes(next_fact_vars, mutexes_group_to_encode);
+    _stats.endTiming(TimingStage::ENCODING_MUTEXES);
+}
+
+void Encoding::encodeMutexes(const std::vector<int> &next_fact_vars, std::unordered_set<int> &mutex_groups_to_encode)
+{
+    // For each mutex group, get the variables
+    for (int mutex_group_idx : mutex_groups_to_encode)
+    {
+        const std::vector<int> &mutex_group = _htn.getMutex().getMutexGroup(mutex_group_idx);
+        std::vector<int> mutex_vars;
+        mutex_vars.reserve(mutex_group.size());
+        for (int pred_idx : mutex_group)
+        {
+            mutex_vars.push_back(next_fact_vars[pred_idx]);
+        }
+        // Encode the at most one with the basic encoding
+        encodeAtMostOne(mutex_vars);
+    }
+}
+
+void Encoding::encodeAtMostOne(const std::vector<int> &vars)
+{
+    // Encode the at most one with the basic encoding
+    for (int i = 0; i < vars.size(); i++)
+    {
+        for (int j = i + 1; j < vars.size(); j++)
+        {
+            _sat.addClause(-vars[i], -vars[j]);
+        }
+    }
+}
+
+void Encoding::encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_to_var)
+{
+    std::vector<int> op_vars;
+    for (const auto &[op_idx, op_var] : map_op_idx_to_var)
+    {
+        op_vars.push_back(op_var);
+    }
+
+    // Encode the at most one with the basic encoding
+    encodeAtMostOne(op_vars);
+}
+
+void Encoding::encodeHierarchy(const PdtNode *cur_node, const PdtNode *parent_node)
+{
+    // For each parent op, get the possible children
+    std::unordered_map<int, std::unordered_set<int>> possible_children_var_per_op_var;
+
+    for (const auto &[child_method, possible_parent] : cur_node->getParentsOfMethodMap())
+    {
+        int var_child = cur_node->getMethodAndVariables().at(child_method);
+        // Child implies at least one parent
+        _sat.appendClause(-var_child);
+        for (int parent_method : possible_parent)
+        {
+            int var_parent = parent_node->getMethodAndVariables().at(parent_method);
+            possible_children_var_per_op_var[var_parent].insert(var_child);
+            _sat.appendClause(var_parent);
+        }
+        _sat.endClause();
+    }
+    // Iterate through the actions in the current node and their potential parents
+    for (const auto &[child_action_idx, possible_parents_set] : cur_node->getParentsOfActionMap())
+    {
+        int var_child = cur_node->getActionAndVariables().at(child_action_idx);
+        _sat.appendClause(-var_child);
+        // Iterate through the set of parent pairs (ID, Type) for this child action
+        for (const auto &parent_pair : possible_parents_set)
+        {
+            int parent_idx = parent_pair.first;
+            OpType parent_type = parent_pair.second;
+
+            int var_parent;
+            // Get the parent variable based on its type
+            if (parent_type == OpType::ACTION)
+            {
+                var_parent = parent_node->getActionAndVariables().at(parent_idx);
+            }
+            else // OpType::METHOD
+            {
+                var_parent = parent_node->getMethodAndVariables().at(parent_idx);
+            }
+            // Add the child variable to the set associated with the parent variable
+            possible_children_var_per_op_var[var_parent].insert(var_child);
+            _sat.appendClause(var_parent);
+        }
+        _sat.endClause();
+    }
+
+    // Each parent implies at least one child
+    for (const auto &[parent_var, children_var] : possible_children_var_per_op_var)
+    {
+        // Parent implies at least one child
+        _sat.appendClause(-parent_var);
+        for (int child_var : children_var)
+        {
+            _sat.appendClause(child_var);
+        }
+        _sat.endClause();
+
+        // Parent imples at most one child
+        std::vector<int> children_var_vec = std::vector<int>(children_var.begin(), children_var.end());
+        encodeAtMostOne(children_var_vec);
+    }
+}
+
+// void Encoding::encodeHierarchy(const PdtNode *cur_node, const PdtNode *parent_node)
+// {
+//     // Each parent implies at least one child
+//     for (const auto &[parent_idx, children_type__idx] : cur_node->getExpansionsOfParentMethodMap())
+//     {
+
+//         // Get the parent variable
+//         int parent_var = parent_node->getMethodAndVariables().at(parent_idx);
+//         _sat.appendClause(-parent_var);
+//         // Get the children variables
+//         for (const auto &[child_idx, child_type] : children_type__idx)
+//         {
+//             int child_var;
+//             if (child_type == OpType::ACTION)
+//             {
+//                 child_var = cur_node->getActionAndVariables().at(child_idx);
+//             }
+//             else // OpType::METHOD
+//             {
+//                 child_var = cur_node->getMethodAndVariables().at(child_idx);
+//             }
+//             _sat.appendClause(child_var);
+//         }
+//         _sat.endClause();
+//     }
+// }
+
+void Encoding::addAssumptions(const std::vector<int> &assumptions)
+{
+    for (int assumption : assumptions)
+    {
+        _sat.assume(assumption);
+    }
+}
+
+int Encoding::solve()
+{
+    return _sat.solve();
+}
+
+void Encoding::setOpsTrueInTree(PdtNode *node, bool accept_relaxed_solution)
+{
+    // Log::i("For node %s\n", TOSTR(*node));
+    // Get the op true in the node
+    int num_ops_true = 0;
+    for (const auto &[op_idx, op_var] : node->getMethodAndVariables())
+    {
+        if (_sat.holds(op_var))
+        {
+            // If it is a leaf node, return an error
+            if (!accept_relaxed_solution && node->getChildren().size() == 0)
+            {
+                throw std::runtime_error("An op true in the leaf node cannot be a method");
+            }
+            node->setOpSolution(op_idx, OpType::METHOD);
+            // TEST CHECK IS THERE IS A PARENT WITH THE SAME METHOD THAT ITSELF
+            // PdtNode* node_test = node;
+            // while (node_test->getParent() != nullptr)
+            // {
+            //     PdtNode* parent = node_test->getParent();
+            //     if (parent->getOpSolution().first == op_idx)
+            //     {
+            //         Log::i("__SAME METHOD WITH PARENT: %s (%d) between %s and %s\n", TOSTR(_htn.getMethodById(op_idx)), op_idx, TOSTR(*node), TOSTR(*parent));
+            //     }
+            //     node_test = parent;
+            // }
+            // Log::i("  Method %s is true\n", TOSTR(_htn.getMethodById(op_idx)));
+            num_ops_true++;
+        }
+    }
+    for (const auto &[op_idx, op_var] : node->getActionAndVariables())
+    {
+        if (_sat.holds(op_var))
+        {
+            node->setOpSolution(op_idx, OpType::ACTION);
+            // Log::i("  Action %s is true\n", TOSTR(_htn.getActionById(op_idx)));
+            num_ops_true++;
+        }
+    }
+    if (num_ops_true > 1)
+    {
+        throw std::runtime_error("There must be one and only one op true in the node, found " + std::to_string(num_ops_true));
+    }
+    // Recursively extract the op true for each child
+    for (PdtNode *child : node->getChildren())
+    {
+        setOpsTrueInTree(child, accept_relaxed_solution);
+    }
+}

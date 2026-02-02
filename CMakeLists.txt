@@ -51,10 +51,10 @@ endif()
 # Source files (without main.cpp)
 
 set(BASE_SOURCES
-    src/util/log.cpp src/util/params.cpp src/util/signal_manager.cpp src/util/timer.cpp src/util/project_utils.cpp src/util/command_utils.cpp src/util/names.cpp
-    src/data/htn_instance.cpp
-    src/sat/encoding.cpp
-    src/algo/planner.cpp
+    src/util/log.cpp src/util/params.cpp src/util/signal_manager.cpp src/util/timer.cpp src/util/project_utils.cpp src/util/command_utils.cpp src/util/names.cpp src/util/stacktrace.cpp
+    src/data/htn_instance.cpp src/data/pdt_node.cpp src/data/mutex.cpp src/data/dag_node.cpp
+    src/sat/encoding.cpp src/sat/variable_provider.cpp src/sat/dag_encoding.cpp
+    src/algo/planner.cpp src/algo/planner_dag.cpp src/algo/plan_manager.cpp src/algo/retroactive_pruning.cpp 
 )
 
 
@@ -102,6 +102,11 @@ execute_process(
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
+# PandaPIplanner to be able to compute preconditions and effects of methods
+execute_process(
+  COMMAND bash -c "cd ${CMAKE_SOURCE_DIR}/lib/prec_and_effs_inference && bash fetch_and_build_prec_and_eff_inference.sh"
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
 
 
 # Solver library

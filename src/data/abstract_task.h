@@ -14,20 +14,13 @@ private:
 public:
     AbstractTask(int id, std::string name) : _id(id), _name(name) {}
 
-    const std::string getName() const
-    {
-        return _name;
-    }
+    const std::string getName() const { return _name; }
 
-    void addDecompositionMethod(int method_idx)
-    {
-        _decomposition_method_idx.push_back(method_idx);
-    }
+    void addDecompositionMethod(int method_idx) { _decomposition_method_idx.push_back(method_idx); }
 
-    const std::vector<int> &getDecompositionMethodIdx() const
-    {
-        return _decomposition_method_idx;
-    }
+    const std::vector<int> &getDecompositionMethodIdx() const { return _decomposition_method_idx; }
+
+    const int getId() const { return _id; }
 };
 
 #endif // ABSTRACT_TASK_H

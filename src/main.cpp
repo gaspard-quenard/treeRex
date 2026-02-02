@@ -9,13 +9,14 @@
 #include <exception>
 #include <execinfo.h>
 #include <signal.h>
-
+#include <exception>
 
 #include "util/log.h"
 #include "util/params.h"
 #include "util/timer.h"
 #include "util/signal_manager.h"
 #include "util/statistics.h"
+#include "util/stacktrace.h" // Include the stacktrace utility
 #include "data/htn_instance.h"
 #include "algo/planner.h"
 
@@ -58,10 +59,19 @@ void outputBanner(bool colors) {
 
 
 void handleSignal(int signum) {
+    
+    // Print stack trace if signal is SIGSEGV or SIGABRT
+    if (signum == SIGSEGV || signum == SIGABRT) {
+        Log::e("Received signal %d (%s)\n", signum, strsignal(signum));
+        StackTrace::print_stacktrace("Signal handler");
+
+        // exit immediately
+        std::exit(EXIT_FAILURE);
+    }
     SignalManager::signalExit();
 }
 
-void run(Parameters& params) {
+int run(Parameters& params) {
 
     Statistics::getInstance().beginTiming(TimingStage::TOTAL);
 
@@ -70,7 +80,14 @@ void run(Parameters& params) {
 
     // Create the planner and find a plan
     Planner planner(htn);
-    int result = planner.findPlan();
+    int result;
+    if (params.isNonzero("ltp")) {
+        Log::i("Using Lifted Tree Path Planner (LTP)\n");
+        result = planner.findPlanLtp();
+    } else {
+        Log::i("Using standard planner\n");
+        result = planner.findPlan();
+    }
 
     Statistics::getInstance().endTiming(TimingStage::TOTAL);
     Statistics::getInstance().printStats();
@@ -80,14 +97,24 @@ void run(Parameters& params) {
         Log::i("Exiting happily (no cleaning up).\n");
         exit(result);
     }
-    Log::i("Exiting happily.\n");
-    return;
+    if (result == 0)
+        Log::i("Exiting happily.\n");
+    else
+        Log::e("Exiting with failure code %d.\n", result);
+    return result;
 }
 
 int main(int argc, char** argv) {
-    
-    signal(SIGTERM, handleSignal);
-    signal(SIGINT, handleSignal);
+
+    // Set the custom terminate handler early
+    // std::set_terminate(my_terminate_handler);
+
+    // Register signal handlers
+    signal(SIGTERM, handleSignal); // Termination request
+    signal(SIGINT, handleSignal);  // Interrupt (Ctrl+C)
+    signal(SIGSEGV, handleSignal); // Segmentation fault
+    signal(SIGABRT, handleSignal); // Abort signal (often from assert or std::terminate)
+
 
     Timer::init();
 
@@ -116,6 +143,8 @@ int main(int argc, char** argv) {
         exit(1);
     }
 
-    run(params);
-    return 0;
+    // Removed the try...catch block. Let uncaught exceptions trigger std::terminate.
+    const int rc = run(params);
+
+    return rc; // Propagate planner status to exit code
 }

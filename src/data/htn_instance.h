@@ -5,10 +5,12 @@
 #include <string>
 #include <optional>
 #include <fstream>
+#include <unordered_set>
 #include "data/action.h"
 #include "data/method.h"
 #include "data/abstract_task.h"
 #include "util/params.h"
+#include "data/mutex.h"
 
 class HtnInstance
 {
@@ -19,11 +21,19 @@ private:
     std::vector<Action> _actions;
     std::vector<AbstractTask> _abstr_tasks;
     std::vector<Method> _methods;
+    int _id_init_action;
     int _id_goal_action;
+    Action *_blankAction;
+    Action *_goalAction;
 
     int _root_task_idx;
-    std::vector<int> _init_state;
-    std::vector<int> _goal_state;
+    std::unordered_set<int> _init_state;
+    std::unordered_set<int> _goal_state;
+    std::vector<int> _all_fact_vars_goal;
+
+    std::unordered_map<int, int> _methods_to_precondition_action;
+
+    Mutex _mutex;
 
     /**
      * Parse the domain and problem files using pandaPIparser.
@@ -84,6 +94,14 @@ private:
     void extractActions(std::ifstream &file, int &line_idx);
 
     /**
+     * Extract mutexes from the grounded problem and store them in `_mutex`.
+     *
+     * @param file The input file stream.
+     * @param line_idx The index of the line to start extraction from.
+     */
+    void extractMutexes(std::ifstream &file, int &line_idx);
+
+    /**
      * Extract initial and goal states from the grounded problem.
      *
      * @param file The input file stream.
@@ -123,6 +141,16 @@ private:
      */
     void sortSubtasks(std::vector<int> &subtasks_id, std::vector<std::pair<int, int>> &ordering_constraints);
 
+    /**
+     * Use pandaPIplanner to compute the preconditions and effects of methods.
+     * And store them in the methods.
+     *
+     * @param grounded_problem_filepath The path to the grounded problem file.
+     *
+     * @return True if the preconditions and effects were computed successfully, false otherwise.
+     */
+    bool getPrecsAndEffsMethods(std::string &grounded_problem_filepath);
+
 public:
     /**
      * Constructor: Initializes and processes the HTN instance.
@@ -131,19 +159,46 @@ public:
      */
     HtnInstance(Parameters &params);
 
-    Parameters& getParams() const;
+    Parameters &getParams() const;
 
-    const AbstractTask& getAbstractTaskById(int task_id) const;
-    const Action& getActionById(int action_id) const;
-    const Method& getMethodById(int method_id) const;
-    const Predicate& getPredicateById(int pred_id) const;
-    const AbstractTask& getRootTask() const;
-    const std::vector<Predicate>& getPredicates() const;
-    Action getGoalAction() const;
-    const std::vector<int>& getInitState() const;
+    const AbstractTask &getAbstractTaskById(int task_id) const;
+    const Action &getActionById(int action_id) const;
+    const Method &getMethodById(int method_id) const;
+    const Predicate &getPredicateById(int pred_id) const;
+    const bool isAbstractTask(int task_id) const;
+    const Action &getBlankAction() const;
+    const AbstractTask &getRootTask() const;
+    const bool isRootTask(const AbstractTask &task) const;
+    const std::vector<Predicate> &getPredicates() const;
+    const Action &getGoalAction() const;
+    const std::unordered_set<int> &getInitState() const;
+    const std::unordered_set<int> &getGoalState() const;
     const int getNumPredicates() const;
+    const std::vector<int> &getFactVarsGoal() const;
+    Mutex& getMutex() { return _mutex; }
+    const bool methodContainsPreconditionAction(int method_id) const
+    {
+        return _methods_to_precondition_action.find(method_id) != _methods_to_precondition_action.end();
+    }
+    const int getPreconditionActionId(int method_id) const
+    {
+        auto it = _methods_to_precondition_action.find(method_id);
+        if (it != _methods_to_precondition_action.end())
+        {
+            return it->second;
+        }
+        return -1; // Not found
+    }
 
+    int getIdInitAction() const
+    {
+        return _id_init_action;
+    }
 
+    int getIdGoalAction() const
+    {
+        return _id_goal_action;
+    }
 };
 
 #endif // HTN_INSTANCE_H
