@@ -4,6 +4,8 @@
 #include <unordered_set>
 #include <algorithm>
 #include <limits>
+#include <chrono>
+#include <cstdio>
 
 
 
@@ -15,7 +17,10 @@ int Planner::findPlanLtp()
     const bool compress_dag = _htn.getParams().isNonzero("compress_dag");
     const bool no_sat_encoding = _htn.getParams().isNonzero("no_sat_encoding");
     const bool optimized_expansion = _htn.getParams().isNonzero("optimized_expansion");
+    const bool profile_expansion = _htn.getParams().isNonzero("profile_expansion");
     const bool htn_connectivity_mode = _htn.getGoalState().empty();
+    const int verbosity = _htn.getParams().getIntParam("v", 2);
+    const bool dump_paths = (verbosity >= 5);
 
     std::vector<DagNode *> nodes;
 
@@ -60,27 +65,157 @@ int Planner::findPlanLtp()
     std::size_t prev_frontier_size = 0;
     int stable_frontier_iters = 0;
 
+    // Buffers for full-DAG compression (reused across depths to reduce allocations).
+    std::unordered_map<std::uint64_t, std::size_t> rep_index;
+    std::vector<DagNode*> reps;
+    std::vector<std::size_t> rep_of;
+    std::vector<std::size_t> rep_indeg_full;
+    std::vector<std::size_t> rep_outdeg_dup_full;
+    std::vector<std::size_t> rep_offsets_dup_full;
+    std::vector<std::size_t> rep_cursor_dup_full;
+    std::vector<std::size_t> rep_offsets_full;
+    std::vector<std::uint32_t> rep_succ_full;
+    // Scratch for fast successor dedup in full compression: seen[rep] == stamp.
+    std::vector<std::uint32_t> rep_seen_stamp;
+    std::uint32_t rep_seen_epoch = 1;
+    // Avoid repeated rehash/reserve churn across depths.
+    std::size_t rep_index_reserve_hint = 0;
+    std::size_t reps_reserve_hint = 0;
+    rep_index.reserve(1024);
+    reps.reserve(1024);
+    rep_of.reserve(1024);
+
+    // Reused buffers for building predecessor lists on-demand from forward edges.
+    // (Used in compress_dag mode to avoid maintaining DagNode::_prev.)
+    std::vector<std::size_t> pred_offsets;
+    std::vector<std::size_t> pred_cursor;
+    std::vector<DagNode*> pred_flat;
+    std::vector<std::size_t> pred_indeg;
+
+    // Reused FIFO queues for Kahn topological order (vector-backed).
+    std::vector<std::size_t> kahn_q;
+    std::vector<std::size_t> rep_kahn_q;
+
     while (!solved && current_depth < max_depth)
     {
         current_depth++;
+        using Clock = std::chrono::steady_clock;
+        const auto t_depth_start = Clock::now();
+        auto ms_since = [&](const Clock::time_point &t0, const Clock::time_point &t1) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+        };
         Log::i("For depth %d\n", current_depth);
 
         Log::i("  Expanding nodes...\n");
 
+        const auto t_expand_start = Clock::now();
+
+        // In compress_dag mode, METHOD expansion needs predecessor information,
+        // but we intentionally do not maintain DagNode::_prev for performance.
+        // Build a reverse CSR (successor -> predecessors) once per depth from
+        // forward edges.
+        if (compress_dag)
+        {
+            const std::size_t n = nodes.size();
+            for (std::size_t i = 0; i < n; ++i)
+                nodes[i]->setTmpIndex(static_cast<int>(i));
+
+            // Ensure outgoing edges only point inside this induced set.
+            for (std::size_t i = 0; i < n; ++i)
+                nodes[i]->compactNextToInduced(nodes);
+
+            pred_indeg.assign(n, 0);
+            for (std::size_t ui = 0; ui < n; ++ui)
+            {
+                DagNode *u = nodes[ui];
+                for (DagNode *v : u->getNext())
+                {
+                    const int vi_i = v ? v->getTmpIndex() : -1;
+                    if (vi_i < 0 || static_cast<std::size_t>(vi_i) >= n)
+                        continue;
+                    if (nodes[static_cast<std::size_t>(vi_i)] != v)
+                        continue;
+                    ++pred_indeg[static_cast<std::size_t>(vi_i)];
+                }
+            }
+
+            pred_offsets.assign(n + 1, 0);
+            for (std::size_t i = 0; i < n; ++i)
+                pred_offsets[i + 1] = pred_offsets[i] + pred_indeg[i];
+
+            pred_flat.resize(pred_offsets[n]);
+            pred_cursor = pred_offsets;
+
+            for (std::size_t ui = 0; ui < n; ++ui)
+            {
+                DagNode *u = nodes[ui];
+                for (DagNode *v : u->getNext())
+                {
+                    const int vi_i = v ? v->getTmpIndex() : -1;
+                    if (vi_i < 0 || static_cast<std::size_t>(vi_i) >= n)
+                        continue;
+                    const std::size_t vi = static_cast<std::size_t>(vi_i);
+                    if (nodes[vi] != v)
+                        continue;
+                    const std::size_t pos = pred_cursor[vi]++;
+                    if (pos < pred_flat.size())
+                        pred_flat[pos] = u;
+                }
+            }
+        }
+
         // Expand exactly like before (no compression during expansion)
         std::vector<DagNode *> new_dag_nodes;
         new_dag_nodes.reserve(nodes.size() * 2);
+        std::vector<DagNode *> expanded_methods_to_free;
+        expanded_methods_to_free.reserve(nodes.size() / 2);
         for (DagNode *node : nodes)
         {
-            std::vector<DagNode*> children = node->expand(_htn);
-            if (node->isMethod()) {
+            if (node->isMethod())
+            {
+                // In compress_dag mode, expanding with detach/erase is expensive.
+                // We keep old edges around and rebuild a clean graph after the
+                // full-DAG compression.
+                const bool detach_and_rewire = !compress_dag;
+                std::vector<DagNode*> children;
+                if (compress_dag)
+                {
+                    const std::size_t mi = static_cast<std::size_t>(node->getTmpIndex());
+                    DagNode *const *preds = pred_flat.empty() ? nullptr : (pred_flat.data() + pred_offsets[mi]);
+                    const std::size_t n_preds = pred_offsets[mi + 1] - pred_offsets[mi];
+                    children = node->expandWithPreds(_htn, preds, n_preds, /*detach_and_rewire=*/false);
+                }
+                else
+                {
+                    children = node->expand(_htn, detach_and_rewire);
+                }
                 for (DagNode *child : children)
                     new_dag_nodes.push_back(child);
-            } else {
+
+                // The METHOD node is replaced by its children in the frontier.
+                // Keep it alive until the end of this pass because later METHOD
+                // expansions may need its last-children frontier.
+                expanded_methods_to_free.push_back(node);
+            }
+            else
+            {
                 new_dag_nodes.push_back(node);
             }
         }
-        nodes = new_dag_nodes;
+
+        // NOTE: When compress_dag=1 we must NOT delete expanded METHOD nodes yet.
+        // Other nodes may still reference them in predecessor/successor vectors.
+        // We will delete them only after we rebuild a clean compressed graph.
+        if (!compress_dag)
+        {
+            for (DagNode *m : expanded_methods_to_free)
+                delete m;
+            expanded_methods_to_free.clear();
+        }
+        const std::size_t expanded_nodes_count = new_dag_nodes.size();
+        nodes = std::move(new_dag_nodes);
+
+        const auto t_expand_end = Clock::now();
 
         Log::i("Number of nodes after expansion: %zu\n", nodes.size());
 
@@ -90,21 +225,30 @@ int Planner::findPlanLtp()
         std::vector<DagNode*> ordered;
         ordered.reserve(nodes.size());
 
-        const bool skip_topo_and_kahn = optimized_expansion && no_sat_encoding && compress_dag;
+        const auto t_order_start = Clock::now();
 
         // If compress_dag is enabled, we will assign timestamps while performing a
         // topological sort. This avoids a second full pass over predecessor sets.
-        if (compress_dag && !skip_topo_and_kahn)
+        if (compress_dag)
         {
             const std::size_t n_nodes = nodes.size();
 
-            std::unordered_map<DagNode *, std::size_t> idx;
-            idx.reserve(n_nodes);
             for (std::size_t i = 0; i < n_nodes; ++i)
-                idx.emplace(nodes[i], i);
+                nodes[i]->setTmpIndex(static_cast<int>(i));
 
-            if (idx.size() != n_nodes)
-                throw std::logic_error("Graph contains duplicate node pointers; topological sort impossible");
+            for (std::size_t i = 0; i < n_nodes; ++i)
+            {
+                DagNode *n = nodes[i];
+                const int ti = n->getTmpIndex();
+                if (ti < 0 || static_cast<std::size_t>(ti) != i || nodes[static_cast<std::size_t>(ti)] != n)
+                    throw std::logic_error("Graph contains duplicate node pointers; topological sort impossible");
+            }
+
+            // One-time edge compaction: remove outgoing edges that point outside the
+            // induced set (e.g., towards expanded METHOD nodes that are no longer in
+            // the frontier). This dramatically reduces the cost of subsequent passes.
+            for (std::size_t i = 0; i < n_nodes; ++i)
+                nodes[i]->compactNextToInduced(nodes);
 
             std::vector<std::size_t> indeg(n_nodes, 0);
             for (std::size_t i = 0; i < n_nodes; ++i)
@@ -112,55 +256,44 @@ int Planner::findPlanLtp()
                 DagNode *u = nodes[i];
                 u->setTs(0);
                 for (DagNode *v : u->getNext())
-                {
-                    auto it = idx.find(v);
-                    if (it == idx.end())
-                        continue;
-                    ++indeg[it->second];
-                }
+                    ++indeg[static_cast<std::size_t>(v->getTmpIndex())];
             }
 
-            std::queue<std::size_t> q;
+            // Use a vector-backed FIFO queue to avoid std::queue/deque overhead.
+            // Reuse the buffer across iterations to avoid reallocations.
+            kahn_q.clear();
+            if (kahn_q.capacity() < n_nodes)
+                kahn_q.reserve(n_nodes);
             for (std::size_t i = 0; i < n_nodes; ++i)
                 if (indeg[i] == 0)
-                    q.push(i);
+                    kahn_q.push_back(i);
 
-            while (!q.empty())
+            std::size_t q_head = 0;
+            while (q_head < kahn_q.size())
             {
-                const std::size_t ui = q.front();
-                q.pop();
+                const std::size_t ui = kahn_q[q_head++];
                 DagNode *u = nodes[ui];
                 ordered.push_back(u);
-
                 const int next_ts = u->getTs() + 1;
                 for (DagNode *v : u->getNext())
                 {
-                    auto it = idx.find(v);
-                    if (it == idx.end())
-                        continue;
-                    const std::size_t vi = it->second;
+                    const std::size_t vi = static_cast<std::size_t>(v->getTmpIndex());
                     if (v->getTs() < next_ts)
                         v->setTs(next_ts);
                     if (--indeg[vi] == 0)
-                        q.push(vi);
+                        kahn_q.push_back(vi);
                 }
             }
 
             if (ordered.size() != n_nodes)
                 throw std::logic_error("Graph contains a cycle; topological sort impossible");
         }
-        else if (skip_topo_and_kahn)
-        {
-            // In expansion-only mode, we can rely on timestamps assigned incrementally
-            // during DagNode::expand(), so we avoid a full induced-subgraph topo pass.
-            ordered = nodes;
-            std::sort(ordered.begin(), ordered.end(),
-                      [](DagNode *a, DagNode *b) { return a->getTs() < b->getTs(); });
-        }
         else
         {
             ordered = DagNode::topologicalSort(nodes);
         }
+
+        const auto t_order_end = Clock::now();
 
         // Keep the working set in topological order even without compression.
         // DagNode::expand() assumes METHOD predecessors are expanded before dependent ACTIONs.
@@ -171,90 +304,249 @@ int Planner::findPlanLtp()
         if (compress_dag)
         {
 
+            const auto t_compress_start = Clock::now();
+
+            // Full-DAG compression is part of the core LTP pipeline and must behave
+            // identically regardless of SAT encoding/solving.
+            const bool do_full_compress = true;
+
+            // Fast full-DAG compression.
+            // Key idea: avoid a global sort/unique over all rep edges.
+            // Instead, build successor lists per representative, sort/unique within
+            // each list, then insert each rep-edge once.
             auto compressFullDag = [&](const std::vector<DagNode*> &input_nodes) {
-                struct NodeKey {
-                    NodeType type;
-                    int op_id;
-                    int ts;
-                    bool operator==(const NodeKey &o) const { return type == o.type && op_id == o.op_id && ts == o.ts; }
-                };
-                struct NodeKeyHash {
-                    std::size_t operator()(const NodeKey &k) const {
-                        std::size_t h = (static_cast<std::size_t>(k.op_id) << 1) ^ static_cast<std::size_t>(k.type == NodeType::METHOD ? 1 : 0);
-                        h ^= (static_cast<std::size_t>(k.ts) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
-                        return h;
-                    }
+                const std::size_t n_in = input_nodes.size();
+                for (std::size_t i = 0; i < n_in; ++i)
+                    input_nodes[i]->setTmpIndex(static_cast<int>(i));
+
+                auto packKey = [](DagNode *n) -> std::uint64_t {
+                    const std::uint64_t type_bit = (n->getType() == NodeType::METHOD) ? 1ULL : 0ULL;
+                    const std::uint64_t op = static_cast<std::uint64_t>(static_cast<std::uint32_t>(n->getOpId()));
+                    const std::uint64_t ts = static_cast<std::uint64_t>(static_cast<std::uint32_t>(n->getTs()));
+                    // [op:32][ts:31][type:1]
+                    return (op << 32) | (ts << 1) | type_bit;
                 };
 
-                std::unordered_map<NodeKey, DagNode*, NodeKeyHash> rep;
-                rep.reserve(input_nodes.size());
-                std::unordered_map<DagNode*, DagNode*> map_old_to_new;
-                map_old_to_new.reserve(input_nodes.size());
+                rep_index.clear();
+                reps.clear();
+                rep_of.assign(n_in, 0);
 
-                // Create representatives.
-                for (DagNode *n : input_nodes)
+                // Create representatives (group by packed key) using a hash map.
+                // Reserve only when n grows, to avoid repeated expensive rehashes.
+                if (n_in > rep_index_reserve_hint)
                 {
-                    NodeKey k{n->getType(), n->getOpId(), n->getTs()};
-                    auto it = rep.find(k);
-                    if (it == rep.end())
+                    rep_index.reserve(n_in);
+                    rep_index_reserve_hint = n_in;
+                }
+                if (n_in > reps_reserve_hint)
+                {
+                    reps.reserve(n_in);
+                    reps_reserve_hint = n_in;
+                }
+
+                for (std::size_t i = 0; i < n_in; ++i)
+                {
+                    DagNode *n = input_nodes[i];
+                    const std::uint64_t k = packKey(n);
+                    auto it = rep_index.find(k);
+                    if (it == rep_index.end())
                     {
                         DagNode *nn = new DagNode(n->getOpId(), n->isLastChild(), n->getType());
                         nn->setTs(n->getTs());
                         nn->setActive(n->isActive());
-                        rep.emplace(k, nn);
-                        map_old_to_new.emplace(n, nn);
+                        const std::size_t idx = reps.size();
+                        rep_index.emplace(k, idx);
+                        reps.push_back(nn);
+                        rep_of[i] = idx;
                     }
                     else
                     {
-                        it->second->setLastChild(n->isLastChild());
-                        it->second->setActive(it->second->isActive() || n->isActive());
-                        map_old_to_new.emplace(n, it->second);
+                        DagNode *nn = reps[it->second];
+                        nn->setLastChild(n->isLastChild());
+                        nn->setActive(nn->isActive() || n->isActive());
+                        rep_of[i] = it->second;
                     }
                 }
 
-                // Build union edges for traversal/expansion.
-                // NOTE: do NOT build conditional successors here; they are only needed
-                // for the SAT encoding on the primitive compressed DAG, and building
-                // them on the full DAG is very expensive.
-                for (DagNode *n : input_nodes)
-                {
-                    auto itn = map_old_to_new.find(n);
-                    if (itn == map_old_to_new.end())
-                        continue;
-                    DagNode *nn = itn->second;
+                const std::size_t n_rep = reps.size();
 
+
+                // NOTE: do NOT build conditional successors here; they are only needed
+                // for the SAT encoding on the primitive compressed DAG.
+
+                // Pass 1: count successor entries per rep (with duplicates).
+                rep_outdeg_dup_full.assign(n_rep, 0);
+                for (std::size_t i = 0; i < n_in; ++i)
+                {
+                    DagNode *n = input_nodes[i];
+                    const std::size_t ui = rep_of[i];
                     for (DagNode *s : n->getNext())
                     {
-                        auto its = map_old_to_new.find(s);
-                        if (its == map_old_to_new.end())
+                        const std::size_t si = static_cast<std::size_t>(s->getTmpIndex());
+                        const std::size_t vi = rep_of[si];
+                        if (ui == vi)
                             continue;
-                        DagNode *ss = its->second;
-                        if (ss == nn)
-                            continue;
-                        if (nn->getTs() >= ss->getTs())
-                            continue;
-                        nn->addNext(ss);
+                        ++rep_outdeg_dup_full[ui];
                     }
                 }
 
+                // Build offsets for the duplicate successor list.
+                rep_offsets_dup_full.assign(n_rep + 1, 0);
+                for (std::size_t i = 0; i < n_rep; ++i)
+                    rep_offsets_dup_full[i + 1] = rep_offsets_dup_full[i] + rep_outdeg_dup_full[i];
+
+                rep_succ_full.resize(rep_offsets_dup_full[n_rep]);
+                rep_cursor_dup_full = rep_offsets_dup_full;
+
+                // Pass 2: fill duplicate successor list.
+                for (std::size_t i = 0; i < n_in; ++i)
+                {
+                    DagNode *n = input_nodes[i];
+                    const std::size_t ui = rep_of[i];
+                    for (DagNode *s : n->getNext())
+                    {
+                        const std::size_t si = static_cast<std::size_t>(s->getTmpIndex());
+                        const std::size_t vi = rep_of[si];
+                        if (ui == vi)
+                            continue;
+                        const std::size_t pos = rep_cursor_dup_full[ui]++;
+                        rep_succ_full[pos] = static_cast<std::uint32_t>(vi);
+                    }
+                }
+
+                // Deduplicate per rep with a stamp array (O(E)) and compute indegrees on unique edges.
+                rep_indeg_full.assign(n_rep, 0);
+                rep_offsets_full.assign(n_rep + 1, 0);
+
+                if (rep_seen_stamp.size() < n_rep)
+                {
+                    rep_seen_stamp.assign(n_rep, 0);
+                    rep_seen_epoch = 1;
+                }
+                if (rep_seen_epoch == 0)
+                {
+                    std::fill(rep_seen_stamp.begin(), rep_seen_stamp.end(), 0);
+                    rep_seen_epoch = 1;
+                }
+
+                std::size_t write_pos = 0;
+                for (std::size_t ui = 0; ui < n_rep; ++ui)
+                {
+                    rep_offsets_full[ui] = write_pos;
+                    const std::size_t b = rep_offsets_dup_full[ui];
+                    const std::size_t e = rep_offsets_dup_full[ui + 1];
+
+                    const std::uint32_t stamp = rep_seen_epoch++;
+                    if (rep_seen_epoch == 0)
+                    {
+                        std::fill(rep_seen_stamp.begin(), rep_seen_stamp.end(), 0);
+                        rep_seen_epoch = 1;
+                    }
+
+                    for (std::size_t p = b; p < e; ++p)
+                    {
+                        const std::uint32_t v32 = rep_succ_full[p];
+                        const std::size_t vi = static_cast<std::size_t>(v32);
+                        if (rep_seen_stamp[vi] == stamp)
+                            continue;
+                        rep_seen_stamp[vi] = stamp;
+                        rep_succ_full[write_pos++] = v32;
+                        ++rep_indeg_full[vi];
+                    }
+
+                    rep_offsets_full[ui + 1] = write_pos;
+                }
+                rep_succ_full.resize(write_pos);
+
+                // Reserve adjacency vectors.
+                for (std::size_t i = 0; i < n_rep; ++i)
+                {
+                    const std::size_t outdeg_u = rep_offsets_full[i + 1] - rep_offsets_full[i];
+                    reps[i]->reserveNext(outdeg_u);
+                    reps[i]->setTs(0);
+                }
+
+                // Insert unique rep-edges into the compressed DAG.
+                for (std::size_t ui = 0; ui < n_rep; ++ui)
+                {
+                    for (std::size_t p = rep_offsets_full[ui]; p < rep_offsets_full[ui + 1]; ++p)
+                    {
+                        const std::size_t vi = static_cast<std::size_t>(rep_succ_full[p]);
+                        reps[ui]->addNextNoBacklink(reps[vi]);
+                    }
+                }
+
+                // Kahn order + longest-path timestamping on the compressed graph.
+                // Vector-backed FIFO queue: faster than std::queue/deque here.
+                // Reuse the buffer across depths to avoid reallocations.
+                rep_kahn_q.clear();
+                if (rep_kahn_q.capacity() < n_rep)
+                    rep_kahn_q.reserve(n_rep);
+                for (std::size_t i = 0; i < n_rep; ++i)
+                    if (rep_indeg_full[i] == 0)
+                        rep_kahn_q.push_back(i);
+
                 std::vector<DagNode*> out;
-                out.reserve(rep.size());
-                for (auto &kv : rep)
-                    out.push_back(kv.second);
+                out.reserve(n_rep);
+
+                std::size_t q_head = 0;
+                while (q_head < rep_kahn_q.size())
+                {
+                    const std::size_t ui = rep_kahn_q[q_head++];
+                    DagNode *u = reps[ui];
+                    out.push_back(u);
+
+                    const int next_ts = u->getTs() + 1;
+                    for (std::size_t p = rep_offsets_full[ui]; p < rep_offsets_full[ui + 1]; ++p)
+                    {
+                        const std::size_t vi = static_cast<std::size_t>(rep_succ_full[p]);
+                        DagNode *v = reps[vi];
+                        if (v->getTs() < next_ts)
+                            v->setTs(next_ts);
+                        if (--rep_indeg_full[vi] == 0)
+                            rep_kahn_q.push_back(vi);
+                    }
+                }
+
+                if (out.size() != n_rep)
+                    throw std::logic_error("Graph contains a cycle after compression; topological order impossible");
 
                 struct Result { std::vector<DagNode*> nodes; std::size_t removed; };
-                return Result{std::move(out), map_old_to_new.size() - rep.size()};
+                return Result{std::move(out), n_in - rep_index.size()};
             };
 
-            auto compressed_full = compressFullDag(ordered);
-            Log::i("Full-DAG compression removed %zu nodes\n", compressed_full.removed);
-            nodes = std::move(compressed_full.nodes);
+            if (do_full_compress)
+            {
+                auto compressed_full = compressFullDag(ordered);
+                Log::i("Full-DAG compression removed %zu nodes\n", compressed_full.removed);
+                nodes = std::move(compressed_full.nodes);
 
-            // IMPORTANT: keep the working set in topological order.
-            // After timestamping, all edges are forward in time, so sorting by ts is
-            // a valid topological order and is much faster than a full topo sort.
-            std::sort(nodes.begin(), nodes.end(),
-                      [](DagNode *a, DagNode *b) { return a->getTs() < b->getTs(); });
+                // We now have a clean graph made of freshly allocated rep nodes.
+                // It is safe (and good for memory) to delete the previous DAG.
+                for (DagNode *n : ordered)
+                    delete n;
+                for (DagNode *m : expanded_methods_to_free)
+                    delete m;
+                expanded_methods_to_free.clear();
+                ordered.clear();
+            }
+
+            const auto t_compress_end = Clock::now();
+
+            if (profile_expansion)
+            {
+                const auto t_depth_end = Clock::now();
+                fprintf(stderr,
+                        "[profile_expansion] depth=%d expanded_nodes=%zu ordered_nodes=%zu frontier_nodes=%zu | expand=%.3fms order=%.3fms compress=%.3fms total=%.3fms\n",
+                        current_depth,
+                        expanded_nodes_count,
+                        ordered.size(),
+                        nodes.size(),
+                        ms_since(t_expand_start, t_expand_end),
+                        ms_since(t_order_start, t_order_end),
+                        ms_since(t_compress_start, t_compress_end),
+                        ms_since(t_depth_start, t_depth_end));
+            }
         }
 
         bool frontier_stable_now = false;
@@ -270,168 +562,239 @@ int Planner::findPlanLtp()
                 const std::uint64_t type_bit = (n->getType() == NodeType::METHOD) ? 1ULL : 0ULL;
                 std::uint64_t h = (static_cast<std::uint64_t>(n->getOpId()) << 1) ^ type_bit;
                 h ^= (static_cast<std::uint64_t>(n->getTs()) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
-                h ^= (static_cast<std::uint64_t>(n->getPrev().size()) << 32) ^ static_cast<std::uint64_t>(n->getNext().size());
+                h ^= static_cast<std::uint64_t>(n->getNext().size());
                 sig_xor ^= h;
                 sig_sum += h;
             }
             const std::uint64_t frontier_sig = sig_xor ^ (sig_sum + 0x9e3779b97f4a7c15ULL + (sig_xor << 6) + (sig_xor >> 2));
+            const std::size_t frontier_size = nodes.size();
 
-            if (nodes.size() == prev_frontier_size && frontier_sig == prev_frontier_sig)
-            {
+            if (frontier_size == prev_frontier_size && frontier_sig == prev_frontier_sig)
                 ++stable_frontier_iters;
-            }
             else
             {
                 stable_frontier_iters = 0;
-                prev_frontier_size = nodes.size();
+                prev_frontier_size = frontier_size;
                 prev_frontier_sig = frontier_sig;
             }
 
             // Require stability twice to reduce risk of accidental collisions.
             frontier_stable_now = (stable_frontier_iters >= 2);
-
-            // In expansion-only mode, we can stop immediately.
-            if (frontier_stable_now && no_sat_encoding)
-            {
-                Log::i("Frontier stabilized at depth %d; stopping early in -no_sat_encoding mode.\n", current_depth);
-                break;
-            }
         }
-
-        // In expansion-only mode, skip all primitive extraction/timestamping/encoding prep.
-        // This is used by scripts/check_speed_expansion.py.
-        if (no_sat_encoding)
-            continue;
 
         // Optional post-pass DAG compression (ACTION nodes only).
         // Builds conditional successors; keeps only edges between provided nodes.
         auto compressDag = [&](const std::vector<DagNode*> &input_nodes) {
-            struct NodeKey {
-                NodeType type;
-                int op_id;
-                int ts;
-                bool operator==(const NodeKey &o) const { return type == o.type && op_id == o.op_id && ts == o.ts; }
-            };
-            struct NodeKeyHash {
-                std::size_t operator()(const NodeKey &k) const {
-                    std::size_t h = (static_cast<std::size_t>(k.op_id) << 1) ^ static_cast<std::size_t>(k.type == NodeType::METHOD ? 1 : 0);
-                    h ^= (static_cast<std::size_t>(k.ts) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
-                    return h;
-                }
-            };
-            // Work on the induced subgraph over input_nodes only.
-            std::unordered_set<DagNode*> all;
-            all.reserve(input_nodes.size());
-            for (DagNode *n : input_nodes)
-                all.insert(n);
+            const std::size_t n_in = input_nodes.size();
+            for (std::size_t i = 0; i < n_in; ++i)
+                input_nodes[i]->setTmpIndex(static_cast<int>(i));
 
-            std::unordered_map<NodeKey, DagNode*, NodeKeyHash> rep;
-            rep.reserve(all.size());
-            std::unordered_map<DagNode*, DagNode*> map_old_to_new;
-            map_old_to_new.reserve(all.size());
+            auto in_induced = [&](DagNode *n) -> int {
+                if (!n)
+                    return -1;
+                const int idx = n->getTmpIndex();
+                if (idx < 0 || static_cast<std::size_t>(idx) >= n_in)
+                    return -1;
+                if (input_nodes[static_cast<std::size_t>(idx)] != n)
+                    return -1;
+                return idx;
+            };
+
+            auto packKey = [](DagNode *n) -> std::uint64_t {
+                const std::uint64_t type_bit = (n->getType() == NodeType::METHOD) ? 1ULL : 0ULL;
+                const std::uint64_t op = static_cast<std::uint64_t>(static_cast<std::uint32_t>(n->getOpId()));
+                const std::uint64_t ts = static_cast<std::uint64_t>(static_cast<std::uint32_t>(n->getTs()));
+                return (op << 32) | (ts << 1) | type_bit;
+            };
+
+            std::unordered_map<std::uint64_t, std::size_t> rep_index;
+            rep_index.reserve(n_in);
+            std::vector<DagNode*> reps;
+            reps.reserve(n_in);
+            std::vector<std::size_t> rep_of(n_in, 0);
+            std::vector<std::uint32_t> rep_count;
 
             // Create representatives.
-            for (DagNode *n : all)
+            for (std::size_t i = 0; i < n_in; ++i)
             {
-                NodeKey k{n->getType(), n->getOpId(), n->getTs()};
-                auto it = rep.find(k);
-                if (it == rep.end())
+                DagNode *n = input_nodes[i];
+                const std::uint64_t k = packKey(n);
+                auto it = rep_index.find(k);
+                if (it == rep_index.end())
                 {
                     DagNode *nn = new DagNode(n->getOpId(), n->isLastChild(), n->getType());
                     nn->setActive(n->isActive());
                     nn->setTs(n->getTs());
-                    rep.emplace(k, nn);
-                    map_old_to_new.emplace(n, nn);
+                    const std::size_t idx = reps.size();
+                    rep_index.emplace(k, idx);
+                    reps.push_back(nn);
+                    rep_of[i] = idx;
                 }
                 else
                 {
-                    it->second->setLastChild(n->isLastChild());
-                    it->second->setActive(it->second->isActive() || n->isActive());
-                    // same key => same timestamp
-                    map_old_to_new.emplace(n, it->second);
+                    DagNode *nn = reps[it->second];
+                    nn->setLastChild(n->isLastChild());
+                    nn->setActive(nn->isActive() || n->isActive());
+                    rep_of[i] = it->second;
                 }
             }
 
-            // Cache contexts to avoid rebuilding vectors repeatedly.
-            std::unordered_map<DagNode*, std::vector<DagNode*>> ctx_cache;
-            ctx_cache.reserve(all.size());
+            rep_count.assign(reps.size(), 0);
+            for (std::size_t i = 0; i < n_in; ++i)
+                ++rep_count[rep_of[i]];
 
-            // Build edges and conditional successors.
-            for (DagNode *n : all)
+            // Build unconditional edges (deduped at rep-level), filtered to stay forward in time.
+            std::vector<std::uint64_t> rep_edges;
+            rep_edges.reserve(n_in * 2);
+            for (std::size_t ui_in = 0; ui_in < n_in; ++ui_in)
             {
-                DagNode *nn = map_old_to_new[n];
-
-                // Incoming edges are unconditional (but filtered to stay forward in time).
-                for (DagNode *p : n->getPrev())
+                DagNode *u = input_nodes[ui_in];
+                const std::size_t ui = rep_of[ui_in];
+                DagNode *uu = reps[ui];
+                for (DagNode *s : u->getNext())
                 {
-                    if (!all.count(p))
+                    const int si_i = in_induced(s);
+                    if (si_i < 0)
                         continue;
-                    DagNode *pp = map_old_to_new[p];
-                    if (pp == nn)
-                        continue; // don't create self-loops when merging identical nodes
-                    if (pp->getTs() >= nn->getTs())
-                        continue; // keep compressed graph acyclic in timestamp order
-                    pp->addNext(nn);
+                    const std::size_t vi_in = static_cast<std::size_t>(si_i);
+                    const std::size_t vi = rep_of[vi_in];
+                    if (ui == vi)
+                        continue;
+                    DagNode *vv = reps[vi];
+                    if (uu->getTs() >= vv->getTs())
+                        continue;
+                    rep_edges.push_back((static_cast<std::uint64_t>(static_cast<std::uint32_t>(ui)) << 32)
+                                        | static_cast<std::uint64_t>(static_cast<std::uint32_t>(vi)));
                 }
+            }
+            std::sort(rep_edges.begin(), rep_edges.end());
+            rep_edges.erase(std::unique(rep_edges.begin(), rep_edges.end()), rep_edges.end());
+            for (const std::uint64_t e : rep_edges)
+            {
+                const std::size_t ui = static_cast<std::size_t>(static_cast<std::uint32_t>(e >> 32));
+                const std::size_t vi = static_cast<std::size_t>(static_cast<std::uint32_t>(e & 0xffffffffULL));
+                reps[ui]->addNext(reps[vi]);
+            }
 
-                // Outgoing edges are conditional on the predecessor-context.
-                auto it_ctx = ctx_cache.find(n);
-                if (it_ctx == ctx_cache.end())
+            // Reverse adjacency for predecessor contexts (by original-node index).
+            std::vector<std::size_t> rev_deg(n_in, 0);
+            for (std::size_t ui_in = 0; ui_in < n_in; ++ui_in)
+            {
+                DagNode *u = input_nodes[ui_in];
+                for (DagNode *s : u->getNext())
                 {
-                    std::unordered_set<DagNode*> prev_new;
-                    for (DagNode *p : n->getPrev())
-                    {
-                        if (!all.count(p))
-                            continue;
-                        prev_new.insert(map_old_to_new.at(p));
-                    }
-                    ctx_cache.emplace(n, DagNode::canonicalizePrevContext(prev_new));
-                    it_ctx = ctx_cache.find(n);
+                    const int si_i = in_induced(s);
+                    if (si_i < 0)
+                        continue;
+                    ++rev_deg[static_cast<std::size_t>(si_i)];
                 }
-
-                // Store conditional successors keyed by SINGLE predecessor.
-                // (The encoding chooses exactly one incoming edge for a selected node.)
-                for (DagNode *p : n->getPrev())
+            }
+            std::vector<std::size_t> rev_off(n_in + 1, 0);
+            for (std::size_t i = 0; i < n_in; ++i)
+                rev_off[i + 1] = rev_off[i] + rev_deg[i];
+            std::vector<std::uint32_t> rev_pred;
+            rev_pred.resize(rev_off[n_in]);
+            std::vector<std::size_t> rev_cur = rev_off;
+            for (std::size_t ui_in = 0; ui_in < n_in; ++ui_in)
+            {
+                DagNode *u = input_nodes[ui_in];
+                for (DagNode *s : u->getNext())
                 {
-                    if (!all.count(p))
+                    const int si_i = in_induced(s);
+                    if (si_i < 0)
                         continue;
-                    DagNode *pp = map_old_to_new.at(p);
-                    if (pp == nn)
-                        continue;
-                    std::vector<DagNode*> ctx{pp};
-                    for (DagNode *s : n->getNext())
-                    {
-                        if (!all.count(s))
-                            continue;
-                        DagNode *ss = map_old_to_new.at(s);
-                        if (ss == nn)
-                            continue;
-                        if (nn->getTs() >= ss->getTs())
-                            continue;
-                        nn->addConditionalNext(ctx, ss);
-                    }
+                    const std::size_t vi_in = static_cast<std::size_t>(si_i);
+                    const std::size_t pos = rev_cur[vi_in]++;
+                    if (pos < rev_pred.size())
+                        rev_pred[pos] = static_cast<std::uint32_t>(ui_in);
                 }
             }
 
-            std::vector<DagNode*> out;
-            out.reserve(rep.size());
-            for (auto &kv : rep)
-                out.push_back(kv.second);
+            // Build conditional successors keyed by SINGLE predecessor.
+            // (The encoding chooses exactly one incoming edge for a selected node.)
+            const std::size_t n_rep = reps.size();
+            std::vector<int> seen_succ(n_rep, -1);
+            std::vector<int> seen_pred(n_rep, -1);
+            std::vector<std::uint32_t> uniq_succ;
+            std::vector<std::uint32_t> uniq_pred;
+            uniq_succ.reserve(64);
+            uniq_pred.reserve(64);
+            int stamp = 0;
+
+            for (std::size_t i = 0; i < n_in; ++i)
+            {
+                DagNode *n = input_nodes[i];
+                const std::size_t nn_id = rep_of[i];
+                // No merge => conditional successors are redundant.
+                if (rep_count[nn_id] <= 1)
+                    continue;
+                DagNode *nn = reps[nn_id];
+
+                ++stamp;
+                uniq_succ.clear();
+                uniq_pred.clear();
+
+                // Unique successor representatives of this original node.
+                for (DagNode *s : n->getNext())
+                {
+                    const int si_i = in_induced(s);
+                    if (si_i < 0)
+                        continue;
+                    const std::size_t si = static_cast<std::size_t>(si_i);
+                    const std::size_t rid = rep_of[si];
+                    if (rid >= n_rep)
+                        continue;
+                    DagNode *ss = reps[rid];
+                    if (ss == nn)
+                        continue;
+                    if (nn->getTs() >= ss->getTs())
+                        continue;
+                    if (seen_succ[rid] == stamp)
+                        continue;
+                    seen_succ[rid] = stamp;
+                    uniq_succ.push_back(static_cast<std::uint32_t>(rid));
+                }
+
+                if (uniq_succ.empty())
+                    continue;
+
+                // Unique predecessor representatives of this original node.
+                for (std::size_t p = rev_off[i]; p < rev_off[i + 1]; ++p)
+                {
+                    const std::size_t pi_in = static_cast<std::size_t>(rev_pred[p]);
+                    const std::size_t rid = rep_of[pi_in];
+                    if (rid >= n_rep)
+                        continue;
+                    DagNode *pp = reps[rid];
+                    if (pp == nn)
+                        continue;
+                    if (seen_pred[rid] == stamp)
+                        continue;
+                    seen_pred[rid] = stamp;
+                    uniq_pred.push_back(static_cast<std::uint32_t>(rid));
+                }
+
+                for (const std::uint32_t pid : uniq_pred)
+                {
+                    DagNode *pp = reps[static_cast<std::size_t>(pid)];
+                    std::unordered_set<DagNode*> &cond_succs = nn->getOrCreateConditionalNextSetSingle(pp);
+                    cond_succs.reserve(cond_succs.size() + uniq_succ.size());
+                    for (const std::uint32_t sid : uniq_succ)
+                        cond_succs.insert(reps[static_cast<std::size_t>(sid)]);
+                }
+            }
 
             struct Result { std::vector<DagNode*> nodes; std::size_t removed; };
-            return Result{std::move(out), all.size() - rep.size()};
+            return Result{std::move(reps), n_in - rep_index.size()};
         };
-
-        if (compress_dag) {
-            Log::i("Number of nodes before compression: %zu\n", ordered.size());
-        }
 
         // First extract primitive ACTION nodes as before.
         Log::i("Pruning methods from the nodes...\n");
-        std::vector<DagNode*> primitive_nodes = DagNode::pruneMethods(ordered);
-        Log::i("Number of primitive nodes: %d/%d\n", primitive_nodes.size(), ordered.size());
+        const std::size_t dag_size_for_pruning = nodes.size();
+        std::vector<DagNode*> primitive_nodes = DagNode::pruneMethods(nodes);
+        Log::i("Number of primitive nodes: %d/%d\n", primitive_nodes.size(), dag_size_for_pruning);
 
-        if (!compress_dag)
+        if (!compress_dag && dump_paths)
             debug_write_all_paths_in_file(nodes, "nodes_" + std::to_string(current_depth) + ".txt");
 
         DagNode *prim_init = nullptr;
@@ -463,6 +826,12 @@ int Planner::findPlanLtp()
             }
         }
 
+        // SAT encoder black box requirement:
+        // Keep using the primitive nodes extracted from the main DAG.
+        // (Aux join nodes are inserted only for METHOD children during expansion,
+        // so primitive ACTION ordering edges remain explicit and unchanged here.)
+        std::vector<DagNode*> primitive_nodes_for_encoding = primitive_nodes;
+
         // Treat pseudo actions as scaffolding: if we do not have any REAL primitive ACTION
         // yet (excluding init/goal/blank), there is nothing meaningful to encode.
         {
@@ -470,7 +839,7 @@ int Planner::findPlanLtp()
             const int blank_id = _htn.getBlankAction().getId();
             const int init_id = _htn.getIdInitAction();
             const int goal_id = _htn.getIdGoalAction();
-            for (DagNode *n : primitive_nodes)
+            for (DagNode *n : primitive_nodes_for_encoding)
             {
                 if (!n || n->getType() != NodeType::ACTION)
                     continue;
@@ -493,13 +862,32 @@ int Planner::findPlanLtp()
         if (htn_connectivity_mode)
         {
             std::unordered_set<DagNode *> prim_set;
-            prim_set.reserve(primitive_nodes.size());
-            for (DagNode *n : primitive_nodes)
+            prim_set.reserve(primitive_nodes_for_encoding.size());
+            for (DagNode *n : primitive_nodes_for_encoding)
                 prim_set.insert(n);
+
+            // Compute primitive indegree using forward edges only.
+            std::unordered_map<DagNode*, int> prim_indeg;
+            prim_indeg.reserve(primitive_nodes.size());
+            for (DagNode *n : primitive_nodes)
+                prim_indeg.emplace(n, 0);
+            for (DagNode *u : primitive_nodes)
+            {
+                if (!u)
+                    continue;
+                for (DagNode *v : u->getNext())
+                {
+                    if (!v)
+                        continue;
+                    auto it = prim_indeg.find(v);
+                    if (it != prim_indeg.end())
+                        ++it->second;
+                }
+            }
 
             // Enforce: init -> (primitive roots) and (primitive leaves) -> goal.
             // Connect init to any primitive node that currently has no primitive predecessors.
-            for (DagNode *n : primitive_nodes)
+            for (DagNode *n : primitive_nodes_for_encoding)
             {
                 if (!n)
                     continue;
@@ -507,16 +895,9 @@ int Planner::findPlanLtp()
                 if (op_id == _htn.getIdInitAction() || op_id == _htn.getIdGoalAction())
                     continue;
 
-                bool has_prim_pred = false;
-                for (DagNode *p : n->getPrev())
-                {
-                    if (p && prim_set.count(p))
-                    {
-                        has_prim_pred = true;
-                        break;
-                    }
-                }
-                if (!has_prim_pred)
+                const auto it = prim_indeg.find(n);
+                const int indeg = (it == prim_indeg.end()) ? 0 : it->second;
+                if (indeg == 0)
                     prim_init->addNext(n);
             }
 
@@ -548,40 +929,55 @@ int Planner::findPlanLtp()
         // reflect required ordering depth of the primitive DAG, not the number of nodes.
         Log::i("Assigning timestamps to the primitive nodes...\n");
         {
-            std::vector<DagNode *> prim_order = DagNode::topologicalSort(primitive_nodes);
-            std::unordered_set<DagNode *> prim_set;
-            prim_set.reserve(prim_order.size() * 2);
-            for (DagNode *n : prim_order)
-                prim_set.insert(n);
+            // primitive_nodes is already a subsequence of `ordered` (topological order),
+            // so we can assign timestamps without re-sorting.
+            std::vector<DagNode *> prim_order = primitive_nodes_for_encoding;
+            const std::size_t n_prim = prim_order.size();
+            for (std::size_t i = 0; i < n_prim; ++i)
+                prim_order[i]->setTmpIndex(static_cast<int>(i));
 
+            auto in_prim = [&](DagNode *n) -> bool {
+                if (!n)
+                    return false;
+                const int idx = n->getTmpIndex();
+                if (idx < 0 || static_cast<std::size_t>(idx) >= n_prim)
+                    return false;
+                return prim_order[static_cast<std::size_t>(idx)] == n;
+            };
+
+            // Longest-path DP in topological order using forward edges only.
             for (DagNode *n : prim_order)
+                n->setTs(0);
+            for (DagNode *u : prim_order)
             {
-                int max_prev_ts = -1;
-                for (DagNode *p : n->getPrev())
+                const int next_ts = u->getTs() + 1;
+                for (DagNode *v : u->getNext())
                 {
-                    if (p && prim_set.count(p))
-                        max_prev_ts = std::max(max_prev_ts, p->getTs());
+                    if (!in_prim(v))
+                        continue;
+                    if (v->getTs() < next_ts)
+                        v->setTs(next_ts);
                 }
-                n->setTs(max_prev_ts + 1);
             }
 
             // Keep primitive_nodes in a deterministic nondecreasing-ts order.
             std::stable_sort(prim_order.begin(), prim_order.end(),
                              [](DagNode *a, DagNode *b) { return a->getTs() < b->getTs(); });
-            primitive_nodes = std::move(prim_order);
+            primitive_nodes_for_encoding = std::move(prim_order);
         }
 
         std::vector<DagNode*> nodes_for_encoding;
         if (compress_dag)
         {
-            auto compressed = compressDag(primitive_nodes);
+            auto compressed = compressDag(primitive_nodes_for_encoding);
             Log::i("Compression removed %zu nodes\n", compressed.removed);
             nodes_for_encoding = std::move(compressed.nodes);
-            debug_write_all_paths_in_file(nodes_for_encoding, "compressed_primitive_nodes_" + std::to_string(current_depth) + ".txt");
+            if (dump_paths)
+                debug_write_all_paths_in_file(nodes_for_encoding, "compressed_primitive_nodes_" + std::to_string(current_depth) + ".txt");
         }
         else
         {
-            nodes_for_encoding = primitive_nodes;
+            nodes_for_encoding = primitive_nodes_for_encoding;
         }
 
         // Then we encode
@@ -602,8 +998,10 @@ int Planner::findPlanLtp()
         std::sort(nodes_for_encoding.begin(), nodes_for_encoding.end(),
               [](DagNode *a, DagNode *b) { return a->getTs() < b->getTs(); });
 
-
-        // (no_sat_encoding handled earlier as a fast-path)
+        // In -no_sat_encoding mode we still run the exact same pipeline up to the
+        // SAT input DAG construction, but we skip calling the encoder/solver.
+        if (no_sat_encoding)
+            continue;
 
         // Encode the primitive nodes
         _dag_enc.encode(nodes_for_encoding);
@@ -624,6 +1022,7 @@ int Planner::findPlanLtp()
 
             return 0; // Success
         }
+
 
         if (frontier_stable_now)
         {
@@ -720,13 +1119,9 @@ void Planner::debug_write_all_paths_in_file(std::vector<DagNode *> &dag, std::st
             for (const auto &kv : node->getConditionalNext())
             {
                 file << nodeString << " @(";
-                const auto &ctx = kv.first;
-                for (std::size_t i = 0; i < ctx.size(); ++i)
-                {
-                    file << nodeLabel(ctx[i]);
-                    if (i + 1 < ctx.size())
-                        file << ",";
-                }
+                DagNode *pred = kv.first;
+                if (pred)
+                    file << nodeLabel(pred);
                 file << ") ";
                 for (DagNode *s : kv.second)
                     file << nodeLabel(s) << " ";

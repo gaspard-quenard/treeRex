@@ -46,15 +46,8 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
 
     // Keep the original sequential semantics: at most one selected node per timestep,
     // but do not force any timestep to have a node.
-    {
-        std::unordered_map<int, std::vector<int>> vars_by_ts;
-        vars_by_ts.reserve(prim_nodes.size());
-        for (DagNode *n : prim_nodes)
-            vars_by_ts[n->getTs()].push_back(n->getSatVar());
-        for (auto &kv : vars_by_ts)
-            if (kv.second.size() > 1)
-                encodeAtMostOne(kv.second);
-    }
+    // NOTE: We encode this after we establish next_free_var (shared with edge vars),
+    // because the linear at-most-one encoding uses auxiliary variables.
 
     // If there is no fact-based goal (HTN-style), selecting only init/goal pseudo-actions
     // is a trivial "solution" that does not execute the decomposition's real actions.
@@ -111,7 +104,57 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
     // We index edges after predicate variables to avoid collisions.
     const int first_pred_var = init_state_pred_var;
     const int first_edge_var = first_pred_var + _htn.getNumPredicates() * (num_timestep + 2);
-    int next_edge_var = first_edge_var;
+    int next_free_var = first_edge_var;
+
+    auto encodeAtMostOneLinear = [&](const std::vector<int> &vars) {
+        // Sequential (Sinz) encoding: O(n) clauses and O(n) auxiliary variables.
+        // For tiny sets, pairwise is fine and avoids extra vars.
+        const int n = static_cast<int>(vars.size());
+        if (n <= 1)
+            return;
+        if (n <= 5)
+        {
+            encodeAtMostOne(vars);
+            return;
+        }
+
+        // s[0..n-2]
+        std::vector<int> s;
+        s.resize(static_cast<std::size_t>(n - 1));
+        for (int i = 0; i < n - 1; ++i)
+            s[static_cast<std::size_t>(i)] = next_free_var++;
+
+        // (-x1 or s1)
+        _sat.addClause(-vars[0], s[0]);
+        // For 2..n-1
+        for (int i = 1; i < n - 1; ++i)
+        {
+            // (-xi or si)
+            _sat.addClause(-vars[i], s[i]);
+            // (-s_{i-1} or si)
+            _sat.addClause(-s[i - 1], s[i]);
+            // (-xi or -s_{i-1})
+            _sat.addClause(-vars[i], -s[i - 1]);
+        }
+        // (-xn or -s_{n-1})
+        _sat.addClause(-vars[n - 1], -s[n - 2]);
+    };
+
+    // Keep the original sequential semantics: at most one selected node per timestep,
+    // but do not force any timestep to have a node.
+    {
+        std::vector<std::vector<int>> vars_by_ts;
+        vars_by_ts.resize(static_cast<std::size_t>(num_timestep + 1));
+        for (DagNode *n : prim_nodes)
+        {
+            const int ts = n->getTs();
+            if (ts >= 0 && ts <= num_timestep)
+                vars_by_ts[static_cast<std::size_t>(ts)].push_back(n->getSatVar());
+        }
+        for (auto &bucket : vars_by_ts)
+            if (bucket.size() > 1)
+                encodeAtMostOneLinear(bucket);
+    }
 
     std::unordered_set<DagNode *> prim_set;
     prim_set.reserve(prim_nodes.size());
@@ -131,7 +174,7 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
         auto it = edge_var.find(k);
         if (it != edge_var.end())
             return it->second;
-        int var = next_edge_var++;
+        int var = next_free_var++;
         edge_var.emplace(k, var);
         // E(u,v) => u and v are selected
         _sat.addClause(-var, u->getSatVar());
@@ -189,7 +232,7 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
                     for (int pred_idx : group)
                         group_vars.push_back(curr_pred_var + pred_idx);
                     if (group_vars.size() > 1)
-                        encodeAtMostOne(group_vars);
+                        encodeAtMostOneLinear(group_vars);
                 }
             }
         }
@@ -228,6 +271,7 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
         std::unordered_set<DagNode *> succs;
         if (current_node->hasConditionalNext())
         {
+            
             for (const auto &kv : current_node->getConditionalNext())
                 for (DagNode *s : kv.second)
                     succs.insert(s);
@@ -258,7 +302,7 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
             _sat.addClause(clause);
 
             if (in_edges.size() > 1)
-                encodeAtMostOne(in_edges);
+                encodeAtMostOneLinear(in_edges);
         }
 
         // If node is selected, it must have one outgoing (unless it has no successors)
@@ -272,7 +316,7 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
             _sat.addClause(clause);
 
             if (out_edges.size() > 1)
-                encodeAtMostOne(out_edges);
+                encodeAtMostOneLinear(out_edges);
         }
 
         // Conditional successor gating (singleton predecessor-context only)
@@ -282,10 +326,7 @@ void DAG_Encoding::encode(std::vector<DagNode *> &prim_nodes)
             std::unordered_map<DagNode *, std::unordered_set<DagNode *>> allowed;
             for (const auto &kv : current_node->getConditionalNext())
             {
-                const auto &ctx = kv.first;
-                if (ctx.size() != 1)
-                    continue;
-                DagNode *pred = ctx[0];
+                DagNode *pred = kv.first;
                 if (!pred || !prim_set.count(pred))
                     continue;
                 for (DagNode *s : kv.second)

@@ -2,114 +2,441 @@
 #include "util/log.h"
 #include "util/names.h"
 
+#include <cstdint>
+
 int DagNode::counter_id = 0; // Initialize the static unique_id counter
 
-std::vector<DagNode *> DagNode::expand(HtnInstance &htn)
+void DagNode::compactNextToInduced(const std::vector<DagNode*> &induced)
+{
+    const std::size_t n = induced.size();
+    std::size_t w = 0;
+    for (DagNode *v : _next)
+    {
+        if (!v)
+            continue;
+        const int idx = v->getTmpIndex();
+        if (idx < 0 || static_cast<std::size_t>(idx) >= n)
+            continue;
+        if (induced[static_cast<std::size_t>(idx)] != v)
+            continue;
+        _next[w++] = v;
+    }
+    _next.resize(w);
+}
+
+void DagNode::rebuildPrevFromNext(const std::vector<DagNode*> &nodes)
+{
+    const std::size_t n = nodes.size();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        DagNode *u = nodes[i];
+        if (u)
+            u->clearPrevShallow();
+    }
+
+    for (std::size_t ui = 0; ui < n; ++ui)
+    {
+        DagNode *u = nodes[ui];
+        if (!u)
+            continue;
+        for (DagNode *v : u->getNext())
+        {
+            if (!v)
+                continue;
+            const int vi = v->getTmpIndex();
+            if (vi < 0 || static_cast<std::size_t>(vi) >= n)
+                continue;
+            if (nodes[static_cast<std::size_t>(vi)] != v)
+                continue;
+            v->addPrev(u);
+        }
+    }
+}
+
+void DagNode::rebuildPrevForMethodsFromNext(const std::vector<DagNode*> &nodes)
+{
+    const std::size_t n = nodes.size();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        DagNode *v = nodes[i];
+        if (v && v->isMethod())
+            v->clearPrevShallow();
+    }
+
+    for (std::size_t ui = 0; ui < n; ++ui)
+    {
+        DagNode *u = nodes[ui];
+        if (!u)
+            continue;
+        for (DagNode *v : u->getNext())
+        {
+            if (!v || !v->isMethod())
+                continue;
+            v->addPrev(u);
+        }
+    }
+}
+
+namespace {
+struct ChildSpec {
+    int op_id;
+    NodeType type;
+    bool last_child;
+};
+
+struct MethodExpansionTemplate {
+    // layers[j] are the nodes created for subtask j.
+    std::vector<std::vector<ChildSpec>> layers;
+};
+
+static const MethodExpansionTemplate &get_or_build_template(HtnInstance &htn, int method_id)
+{
+    // One Treerex process handles a single HTN instance in practice, so a
+    // process-wide cache is safe and avoids plumbing this through HtnInstance.
+    static std::unordered_map<int, MethodExpansionTemplate> cache;
+    auto it = cache.find(method_id);
+    if (it != cache.end())
+        return it->second;
+
+    MethodExpansionTemplate tpl;
+    const Method &method = htn.getMethodById(method_id);
+    const std::size_t n_subtasks = method.getSubtasksIdx().size();
+    tpl.layers.resize(n_subtasks);
+    const std::size_t last_j = (n_subtasks == 0) ? 0 : (n_subtasks - 1);
+
+    for (std::size_t j = 0; j < n_subtasks; ++j)
+    {
+        const int subtask_idx = method.getSubtasksIdx()[j];
+        const bool is_last_child = (j == last_j);
+
+        if (htn.isAbstractTask(subtask_idx))
+        {
+            const AbstractTask &task = htn.getAbstractTaskById(subtask_idx);
+            auto &layer = tpl.layers[j];
+            layer.reserve(task.getDecompositionMethodIdx().size());
+            for (int sub_method_idx : task.getDecompositionMethodIdx())
+                layer.push_back(ChildSpec{sub_method_idx, NodeType::METHOD, is_last_child});
+        }
+        else
+        {
+            tpl.layers[j].push_back(ChildSpec{subtask_idx, NodeType::ACTION, is_last_child});
+        }
+    }
+
+    auto [ins_it, _] = cache.emplace(method_id, std::move(tpl));
+    return ins_it->second;
+}
+} // namespace
+
+std::vector<DagNode *> DagNode::expand(HtnInstance &htn, bool detach_and_rewire)
 {
 
-    std::unordered_set<DagNode *> old_prev = _prev;
-    std::unordered_set<DagNode *> new_prev;
-    for (DagNode *prev_node : old_prev)
+    // Fast path for ACTION nodes: once an action has no METHOD predecessors left
+    // and it already has no outgoing edges (as per the expansion procedure),
+    // further expand() calls are a no-op.
+    if (!isMethod())
     {
+        bool has_method_prev = false;
+        for (DagNode *p : _prev)
+        {
+            if (p && p->getType() == NodeType::METHOD)
+            {
+                has_method_prev = true;
+                break;
+            }
+        }
+
+        if (!has_method_prev && _next.empty())
+            return std::vector<DagNode *>();
+    }
+
+    // Rewrite predecessors: replace METHOD predecessors by their expanded last-children.
+    // Use vector + sort/unique to avoid unordered_set hashing/allocations here.
+    std::vector<DagNode *> prev_layer;
+    prev_layer.reserve(_prev.size());
+    for (DagNode *prev_node : _prev)
+    {
+        if (!prev_node)
+            continue;
         if (prev_node->getType() == NodeType::METHOD)
         {
-            for (DagNode *child : prev_node->getChildren())
+            const std::vector<DagNode*> &kids = prev_node->getLastChildren();
+            if (!kids.empty())
             {
-                if (child->isLastChild())
-                    new_prev.insert(child);
+                for (DagNode *child : kids)
+                    if (child)
+                        prev_layer.push_back(child);
+            }
+            else
+            {
+                // Predecessor METHOD not expanded yet: keep it as a predecessor.
+                prev_layer.push_back(prev_node);
             }
         }
         else
         {
-            new_prev.insert(prev_node);
+            prev_layer.push_back(prev_node);
         }
     }
+    std::sort(prev_layer.begin(), prev_layer.end());
+    prev_layer.erase(std::unique(prev_layer.begin(), prev_layer.end()), prev_layer.end());
 
     if (!isMethod())
     {
         // ACTION nodes are kept across depth iterations.
-        // Rewire predecessors with proper backlink maintenance, otherwise old METHOD
-        // predecessors (that got expanded/removed) keep stale next-edges to this node.
-
-        // Maintain a consistent "time" label for this ACTION: it must occur strictly
-        // after all of its current predecessors.
-        int max_prev_ts = -1;
-        for (DagNode *p : new_prev)
-            max_prev_ts = std::max(max_prev_ts, p->getTs());
-        setTs(max_prev_ts + 1);
-
-        rewirePrev(new_prev);
-
-        // IMPORTANT: do NOT remove backlinks when clearing successors here.
-        // Successor nodes still rely on their `_prev` sets during the same and
-        // subsequent depth iterations (to rewrite METHOD predecessors to their last
-        // children). Removing backlinks here disconnects the DAG and collapses the
-        // primitive graph, making the SAT encoding trivially UNSAT.
-        clearNextShallow();
+        // With successor rewiring performed when expanding METHOD nodes, ACTION nodes
+        // no longer need to rewrite their predecessor sets each depth.
         return std::vector<DagNode *>();
     }
 
     // Defensive: if expand() is (unexpectedly) called twice on the same METHOD node,
-    // don't keep accumulating children.
-    _children.clear();
+    // don't keep accumulating last-children.
+    _last_children.clear();
 
-    const Method &method = htn.getMethodById(op_id);
-    // Log::i("Children of method %s\n", TOSTR(method));
-    std::unordered_set<DagNode *> prev = new_prev;
-    int num_offset = method.getSubtasksIdx().size() - 1;
-    for (size_t j = 0; j < method.getSubtasksIdx().size(); ++j)
-    {
-        std::unordered_set<DagNode *> next_nodes;
-        int max_prev_ts = -1;
-        for (DagNode *p : prev)
+    // We return all nodes created by this expansion so the planner can add them
+    // to the next frontier. This is separate from _last_children.
+    std::vector<DagNode *> created_nodes;
+
+    // Template-based expansion: the internal structure of a METHOD expansion
+    // depends only on the method definition (subtasks + abstract-task choices).
+    // Timestamps depend only on the max timestamp of the incoming frontier.
+    const MethodExpansionTemplate &tpl = get_or_build_template(htn, op_id);
+
+    int max_prev_ts = -1;
+    for (DagNode *p : prev_layer)
+        if (p)
             max_prev_ts = std::max(max_prev_ts, p->getTs());
 
-        int subtask_idx = method.getSubtasksIdx()[j];
-        if (htn.isAbstractTask(subtask_idx))
+    const int base_ts = max_prev_ts + 1;
+    for (std::size_t layer_idx = 0; layer_idx < tpl.layers.size(); ++layer_idx)
+    {
+        const auto &layer_specs = tpl.layers[layer_idx];
+        std::vector<DagNode *> cur_layer;
+        cur_layer.reserve(layer_specs.size());
+
+        const int layer_ts = base_ts + static_cast<int>(layer_idx);
+        for (const ChildSpec &spec : layer_specs)
         {
-            // Log::i("  Subtask %d is the abstract task %s\n", j, TOSTR(htn.getAbstractTaskById(subtask_idx)));
-            const AbstractTask &task = htn.getAbstractTaskById(subtask_idx);
-            // Add all the methods of the abstract task to the j-th children
-            for (int sub_method_idx : task.getDecompositionMethodIdx())
+            DagNode *child = new DagNode(spec.op_id, spec.last_child, spec.type);
+            child->setTs(layer_ts);
+            // Each child in this layer receives an edge from every node in prev_layer.
+            if (detach_and_rewire)
+                child->reservePrev(prev_layer.size());
+            cur_layer.push_back(child);
+            created_nodes.push_back(child);
+        }
+
+        if (detach_and_rewire)
+        {
+            // Exact behavior: complete bipartite between previous frontier and this layer.
+            for (DagNode *prev_node : prev_layer)
             {
-                // Log::i("At subtask %d, adding method %s\n", j, TOSTR(htn.getMethodById(sub_method_idx)));
-                // Create a new dag node for the sub-method
-                DagNode *sub_method_node = new DagNode(sub_method_idx, j == num_offset, NodeType::METHOD);
-                sub_method_node->setTs(max_prev_ts + 1);
-                // All previous nodes have this node as next
-                for (DagNode *prev_node : prev)
-                {
-                    prev_node->addNext(sub_method_node);
-                }
-                next_nodes.insert(sub_method_node);
-                _children.push_back(sub_method_node);
+                prev_node->reserveNextAdditional(cur_layer.size());
+                for (DagNode *child : cur_layer)
+                    prev_node->addNext(child);
             }
         }
         else
         {
-            // Log::i("  Subtask %d is the action %s\n", j, TOSTR(htn.getActionById(subtask_idx)));
-            // Create a new dag node for the action
-            DagNode *action_node = new DagNode(subtask_idx, j == num_offset, NodeType::ACTION);
-            action_node->setTs(max_prev_ts + 1);
-            // All previous nodes have this node as next
-            for (DagNode *prev_node : prev)
+            // Fast behavior: complete bipartite between previous frontier and this layer
+            // using forward-only insertion (no backlink maintenance).
+            for (DagNode *prev_node : prev_layer)
             {
-                prev_node->addNext(action_node);
+                prev_node->reserveNextAdditional(cur_layer.size());
+                for (DagNode *child : cur_layer)
+                    prev_node->addNextNoBacklink(child);
             }
-            next_nodes.insert(action_node);
-            _children.push_back(action_node);
         }
-        prev = next_nodes;
-        next_nodes.clear();
+
+        prev_layer.swap(cur_layer);
     }
 
-    // Detach this METHOD node from the working graph so it doesn't leave stale edges
-    // behind (it is replaced by its children in the frontier).
-    rewirePrev(std::unordered_set<DagNode *>{});
-    // Same rationale as for ACTION nodes above: keep successor `_prev` pointers intact
-    // so they can rewrite METHOD predecessors to last-children in later iterations.
-    clearNextShallow();
-    return _children;
+    // Identify the current "last-children" frontier of this expanded method.
+    std::vector<DagNode*> last_children;
+    last_children.reserve(prev_layer.size());
+    for (DagNode *n : prev_layer)
+        if (n)
+            last_children.push_back(n);
+    _last_children = last_children;
+
+    // Rewire: last_children -> each successor.
+    // In detach_and_rewire=false mode we keep the old edges intact (faster),
+    // and rely on the caller to rebuild a clean graph before freeing memory.
+    {
+        std::vector<DagNode*> succs;
+        succs.reserve(_next.size());
+        for (DagNode *s : _next)
+            if (s)
+                succs.push_back(s);
+
+        for (DagNode *s : succs)
+        {
+            if (detach_and_rewire)
+                removeNext(s);
+            for (DagNode *lc : last_children)
+            {
+                if (detach_and_rewire)
+                    lc->addNext(s);
+                else
+                    lc->addNextNoBacklink(s);
+            }
+        }
+
+        if (detach_and_rewire)
+        {
+            // Remove predecessor -> this edges, since this METHOD is being replaced.
+            // Snapshot current predecessors before mutating backlinks.
+            std::vector<DagNode*> preds;
+            preds.reserve(_prev.size());
+            for (DagNode *p : _prev)
+                if (p)
+                    preds.push_back(p);
+            for (DagNode *p : preds)
+                p->removeNext(this);
+
+            // Clear remaining adjacency of this node.
+            _prev.clear();
+            _next.clear();
+        }
+    }
+
+    return created_nodes;
+}
+
+std::vector<DagNode *> DagNode::expandWithPreds(HtnInstance &htn, DagNode *const *preds, std::size_t n_preds, bool detach_and_rewire)
+{
+    if (!isMethod())
+        return std::vector<DagNode *>();
+
+    // Rewrite predecessors: replace METHOD predecessors by their expanded last-children.
+    std::vector<DagNode *> prev_layer;
+    prev_layer.reserve(n_preds);
+    for (std::size_t i = 0; i < n_preds; ++i)
+    {
+        DagNode *prev_node = preds[i];
+        if (!prev_node)
+            continue;
+        if (prev_node->getType() == NodeType::METHOD)
+        {
+            const std::vector<DagNode*> &kids = prev_node->getLastChildren();
+            if (!kids.empty())
+            {
+                for (DagNode *child : kids)
+                    if (child)
+                        prev_layer.push_back(child);
+            }
+            else
+            {
+                // Predecessor METHOD not expanded yet: keep it as a predecessor.
+                prev_layer.push_back(prev_node);
+            }
+        }
+        else
+        {
+            prev_layer.push_back(prev_node);
+        }
+    }
+    std::sort(prev_layer.begin(), prev_layer.end());
+    prev_layer.erase(std::unique(prev_layer.begin(), prev_layer.end()), prev_layer.end());
+
+    // Defensive: if expand() is (unexpectedly) called twice on the same METHOD node,
+    // don't keep accumulating last-children.
+    _last_children.clear();
+
+    std::vector<DagNode *> created_nodes;
+
+    const MethodExpansionTemplate &tpl = get_or_build_template(htn, op_id);
+
+    int max_prev_ts = -1;
+    for (DagNode *p : prev_layer)
+        if (p)
+            max_prev_ts = std::max(max_prev_ts, p->getTs());
+
+    const int base_ts = max_prev_ts + 1;
+    for (std::size_t layer_idx = 0; layer_idx < tpl.layers.size(); ++layer_idx)
+    {
+        const auto &layer_specs = tpl.layers[layer_idx];
+        std::vector<DagNode *> cur_layer;
+        cur_layer.reserve(layer_specs.size());
+
+        const int layer_ts = base_ts + static_cast<int>(layer_idx);
+        for (const ChildSpec &spec : layer_specs)
+        {
+            DagNode *child = new DagNode(spec.op_id, spec.last_child, spec.type);
+            child->setTs(layer_ts);
+            if (detach_and_rewire)
+                child->reservePrev(prev_layer.size());
+            cur_layer.push_back(child);
+            created_nodes.push_back(child);
+        }
+
+        if (detach_and_rewire)
+        {
+            for (DagNode *prev_node : prev_layer)
+            {
+                prev_node->reserveNextAdditional(cur_layer.size());
+                for (DagNode *child : cur_layer)
+                    prev_node->addNext(child);
+            }
+        }
+        else
+        {
+            for (DagNode *prev_node : prev_layer)
+            {
+                prev_node->reserveNextAdditional(cur_layer.size());
+                for (DagNode *child : cur_layer)
+                    prev_node->addNextNoBacklink(child);
+            }
+        }
+
+        prev_layer.swap(cur_layer);
+    }
+
+    std::vector<DagNode*> last_children;
+    last_children.reserve(prev_layer.size());
+    for (DagNode *n : prev_layer)
+        if (n)
+            last_children.push_back(n);
+    _last_children = last_children;
+
+    // Rewire: last_children -> each successor.
+    {
+        std::vector<DagNode*> succs;
+        succs.reserve(_next.size());
+        for (DagNode *s : _next)
+            if (s)
+                succs.push_back(s);
+
+        for (DagNode *s : succs)
+        {
+            if (detach_and_rewire)
+                removeNext(s);
+            for (DagNode *lc : last_children)
+            {
+                if (detach_and_rewire)
+                    lc->addNext(s);
+                else
+                    lc->addNextNoBacklink(s);
+            }
+        }
+
+        if (detach_and_rewire)
+        {
+            // Remove predecessor -> this edges, since this METHOD is being replaced.
+            std::vector<DagNode*> preds_snapshot;
+            preds_snapshot.reserve(_prev.size());
+            for (DagNode *p : _prev)
+                if (p)
+                    preds_snapshot.push_back(p);
+            for (DagNode *p : preds_snapshot)
+                p->removeNext(this);
+
+            _prev.clear();
+            _next.clear();
+        }
+    }
+
+    return created_nodes;
 }
 
 std::vector<DagNode *> DagNode::topologicalSort(const std::vector<DagNode *> &nodes)
@@ -179,80 +506,170 @@ std::vector<DagNode *> DagNode::topologicalSort(const std::vector<DagNode *> &no
 
 std::vector<DagNode *> DagNode::pruneMethods(const std::vector<DagNode *> &nodes)
 {
-    // Restrict to the subgraph induced by --nodes--.
-    std::unordered_set<DagNode *> node_set;
-    node_set.reserve(nodes.size());
-    for (DagNode *n : nodes)
-        node_set.insert(n);
+    const std::size_t n_nodes = nodes.size();
+    if (n_nodes == 0)
+        return {};
 
-    /*------------  Build reverse adjacency & indegree --------------*/
-    std::unordered_map<DagNode *, std::vector<DagNode *>> preds;
-    std::unordered_map<DagNode *, std::size_t> indeg;
-    preds.reserve(nodes.size());
-    indeg.reserve(nodes.size());
+    // Index nodes for fast induced-subgraph membership tests.
+    for (std::size_t i = 0; i < n_nodes; ++i)
+        nodes[i]->setTmpIndex(static_cast<int>(i));
 
-    for (DagNode *n : nodes)
+    auto in_induced = [&](DagNode *n) -> int {
+        if (!n)
+            return -1;
+        const int idx = n->getTmpIndex();
+        if (idx < 0 || static_cast<std::size_t>(idx) >= n_nodes)
+            return -1;
+        if (nodes[static_cast<std::size_t>(idx)] != n)
+            return -1;
+        return idx;
+    };
+
+    // Compute indegree within the induced subgraph.
+    std::vector<std::size_t> indeg(n_nodes, 0);
+    for (std::size_t ui = 0; ui < n_nodes; ++ui)
     {
-        indeg.try_emplace(n, 0);
+        DagNode *u = nodes[ui];
+        for (DagNode *succ : u->getNext())
+        {
+            const int vi_i = in_induced(succ);
+            if (vi_i < 0)
+                continue;
+            ++indeg[static_cast<std::size_t>(vi_i)];
+        }
+    }
+
+    // Phase 1: forward reachability from roots (roots that are not methods).
+    std::vector<unsigned char> fwd(n_nodes, 0);
+    std::queue<std::size_t> q;
+    for (std::size_t i = 0; i < n_nodes; ++i)
+    {
+        if (indeg[i] == 0 && !nodes[i]->isMethod())
+        {
+            fwd[i] = 1;
+            q.push(i);
+        }
+    }
+    while (!q.empty())
+    {
+        const std::size_t ui = q.front();
+        q.pop();
+        DagNode *cur = nodes[ui];
+        for (DagNode *succ : cur->getNext())
+        {
+            if (!succ || succ->isMethod())
+                continue;
+            const int vi_i = in_induced(succ);
+            if (vi_i < 0)
+                continue;
+            const std::size_t vi = static_cast<std::size_t>(vi_i);
+            if (!fwd[vi])
+            {
+                fwd[vi] = 1;
+                q.push(vi);
+            }
+        }
+    }
+
+    // Phase 2: backward reachability from (real) non-method leaves.
+    // We do not rely on stored predecessor lists, since they may not be
+    // maintained in performance-critical pipelines. Instead, build a compact
+    // reverse adjacency for the induced subgraph.
+    std::vector<std::size_t> rev_deg(n_nodes, 0);
+    for (std::size_t ui = 0; ui < n_nodes; ++ui)
+    {
+        DagNode *u = nodes[ui];
+        if (!u || u->isMethod())
+            continue;
+        for (DagNode *succ : u->getNext())
+        {
+            if (!succ || succ->isMethod())
+                continue;
+            const int vi_i = in_induced(succ);
+            if (vi_i < 0)
+                continue;
+            ++rev_deg[static_cast<std::size_t>(vi_i)];
+        }
+    }
+
+    std::vector<std::size_t> rev_off(n_nodes + 1, 0);
+    for (std::size_t i = 0; i < n_nodes; ++i)
+        rev_off[i + 1] = rev_off[i] + rev_deg[i];
+
+    std::vector<std::uint32_t> rev_pred;
+    rev_pred.resize(rev_off[n_nodes]);
+    std::vector<std::size_t> rev_cur = rev_off;
+
+    for (std::size_t ui = 0; ui < n_nodes; ++ui)
+    {
+        DagNode *u = nodes[ui];
+        if (!u || u->isMethod())
+            continue;
+        for (DagNode *succ : u->getNext())
+        {
+            if (!succ || succ->isMethod())
+                continue;
+            const int vi_i = in_induced(succ);
+            if (vi_i < 0)
+                continue;
+            const std::size_t vi = static_cast<std::size_t>(vi_i);
+            const std::size_t pos = rev_cur[vi]++;
+            if (pos < rev_pred.size())
+                rev_pred[pos] = static_cast<std::uint32_t>(ui);
+        }
+    }
+
+    std::vector<unsigned char> bwd(n_nodes, 0);
+    for (std::size_t i = 0; i < n_nodes; ++i)
+    {
+        DagNode *n = nodes[i];
+        if (!n || n->isMethod())
+            continue;
+        // A non-method leaf in the *non-method induced* subgraph.
+        bool has_non_method_succ = false;
         for (DagNode *succ : n->getNext())
         {
-            if (!node_set.count(succ))
-                continue;
-            preds[succ].push_back(n);
-            ++indeg[succ];
+            if (succ && !succ->isMethod() && in_induced(succ) >= 0)
+            {
+                has_non_method_succ = true;
+                break;
+            }
+        }
+        if (!has_non_method_succ)
+        {
+            bwd[i] = 1;
+            q.push(i);
         }
     }
-
-    /*------------  Phase 1: forward reachability from roots --------*/
-    std::unordered_set<DagNode *> fwd; // reachable & non-method
-    std::queue<DagNode *> q;
-
-    for (DagNode *n : nodes)
-        if (indeg[n] == 0 && !n->isMethod()) // roots that are not methods
-        {
-            fwd.insert(n);
-            q.push(n);
-        }
 
     while (!q.empty())
     {
-        DagNode *cur = q.front();
+        const std::size_t ui = q.front();
         q.pop();
-        for (DagNode *succ : cur->getNext())
-            if (!succ->isMethod() && fwd.insert(succ).second)
-                q.push(succ);
-    }
-
-    /*------------  Phase 2: backward reachability from leaves ------*/
-    std::unordered_set<DagNode *> bwd; // can reach a non-method leaf
-    for (DagNode *n : nodes)
-        if (!n->isMethod() && n->getNext().empty()) // real leaves
+        for (std::size_t p = rev_off[ui]; p < rev_off[ui + 1]; ++p)
         {
-            bwd.insert(n);
-            q.push(n);
+            const std::size_t pi = static_cast<std::size_t>(rev_pred[p]);
+            if (!bwd[pi])
+            {
+                bwd[pi] = 1;
+                q.push(pi);
+            }
         }
-
-    while (!q.empty())
-    {
-        DagNode *cur = q.front();
-        q.pop();
-        for (DagNode *pred : preds[cur])
-            if (!pred->isMethod() && bwd.insert(pred).second)
-                q.push(pred);
     }
 
-    /*------------  Intersection: nodes that survive both passes ----*/
+    // Intersection: nodes that survive both passes.
     std::vector<DagNode *> surviving;
-    surviving.reserve(nodes.size());
-    for (DagNode *n : nodes)
-        if (fwd.count(n) && bwd.count(n)) {
-            n->setActive(true); // Mark as active
-            surviving.push_back(n);
+    surviving.reserve(n_nodes);
+    for (std::size_t i = 0; i < n_nodes; ++i)
+    {
+        if (fwd[i] && bwd[i])
+        {
+            nodes[i]->setActive(true);
+            surviving.push_back(nodes[i]);
         }
+    }
 
-    /*------------  Optional: sort the surviving DAG ---------------*/
-    // return DagNode::topologicalSort(surviving); // Not sure it is useful if nodes is already sorted
-    return surviving; // return the surviving nodes
+    return surviving;
 }
 
 

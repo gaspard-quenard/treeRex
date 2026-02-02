@@ -71,6 +71,7 @@ void Parameters::setDefaults()
     setParam("compress_dag", "0"); // Use Lifted Tree Path Planner (LTP)
     setParam("no_sat_encoding", "0"); // Do not use SAT encoding at all, jsut check the expansion
     setParam("optimized_expansion", "0"); // Enable expansion-oriented optimizations (safe with SAT encoding)
+    setParam("profile_expansion", "0"); // Print per-depth timing breakdown (debugging performance)
 }
 
 void Parameters::printUsage()

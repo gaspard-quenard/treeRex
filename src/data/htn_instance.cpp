@@ -16,13 +16,24 @@
 
 HtnInstance::HtnInstance(Parameters &params) : _params(params)
 {
-    auto parsed_problem = parseProblem(params.getDomainFilename(), params.getProblemFilename());
-    if (!parsed_problem)
-        return;
+    // Fast path: allow callers (e.g., expansion speed benchmarks) to provide an
+    // already grounded problem file and skip external parser/grounder startup.
+    // Usage: -grounded=/path/to/problem.grounded
+    const std::string grounded_override = _params.getParam("grounded", "");
+    std::optional<std::string> grounded_problem;
 
-    auto grounded_problem = groundProblem(*parsed_problem);
-    if (!grounded_problem)
-        return;
+    if (!grounded_override.empty() && grounded_override != "ndef")
+        grounded_problem = grounded_override;
+    else
+    {
+        auto parsed_problem = parseProblem(params.getDomainFilename(), params.getProblemFilename());
+        if (!parsed_problem)
+            return;
+
+        grounded_problem = groundProblem(*parsed_problem);
+        if (!grounded_problem)
+            return;
+    }
 
     loadGroundedProblem(*grounded_problem);
 
