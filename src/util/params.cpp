@@ -58,6 +58,7 @@ void Parameters::setDefaults()
     setParam("wp", "0");      // output plan to plan.txt
     setParam("pvn", "0");      // Print variable names
     setParam("mutex", "0");   // Use mutexes during the encoding
+    setParam("amo", "commander"); // Encoding of the at-most-one constraints: pairwise or commander
 }
 
 void Parameters::printUsage()

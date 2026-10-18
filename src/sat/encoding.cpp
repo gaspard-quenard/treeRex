@@ -212,7 +212,15 @@ void Encoding::encodeFrameAxioms(const FactVariables &current_fact_vars, const F
 
 void Encoding::encodeAtMostOne(const std::vector<int> &vars)
 {
-    // Encode the at most one with the basic encoding
+    if (_amo_pairwise)
+        encodeAtMostOnePairwise(vars);
+    else
+        encodeAtMostOneCommander(vars);
+}
+
+void Encoding::encodeAtMostOnePairwise(const std::vector<int> &vars)
+{
+    // Basic encoding: one binary clause (not x_i or not x_j) for each pair of variables -> n*(n-1)/2 clauses
     for (int i = 0; i < vars.size(); i++)
     {
         for (int j = i + 1; j < vars.size(); j++)
@@ -220,6 +228,41 @@ void Encoding::encodeAtMostOne(const std::vector<int> &vars)
             _sat.addClause(-vars[i], -vars[j]);
         }
     }
+}
+
+void Encoding::encodeAtMostOneCommander(const std::vector<int> &vars)
+{
+    // Commander encoding (Klieber & Kwon, 2007): about 3n clauses and n/2 new variables instead of n*(n-1)/2 clauses,
+    // and unit propagation still sets all the other variables to false as soon as one variable is true.
+    // The variables are split into groups of 3. In each group, at most one variable is true (pairwise encoding)
+    // and each variable implies the "commander" variable of its group. Then, recursively, at most one commander is true.
+
+    // For small sets, the pairwise encoding is as compact and needs no new variable
+    if (vars.size() <= 6)
+    {
+        encodeAtMostOnePairwise(vars);
+        return;
+    }
+
+    std::vector<int> commanders;
+    for (size_t start = 0; start < vars.size(); start += 3)
+    {
+        std::vector<int> group(vars.begin() + start, vars.begin() + std::min(start + 3, vars.size()));
+        if (group.size() == 1)
+        {
+            // A group with a single variable does not need a commander: the variable is its own commander
+            commanders.push_back(group[0]);
+            continue;
+        }
+        encodeAtMostOnePairwise(group);
+        int commander = VariableProvider::nextVar();
+        for (int var : group)
+        {
+            _sat.addClause(-var, commander);
+        }
+        commanders.push_back(commander);
+    }
+    encodeAtMostOneCommander(commanders);
 }
 
 void Encoding::encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_to_var)
