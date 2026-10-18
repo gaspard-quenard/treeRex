@@ -39,6 +39,7 @@ int Planner::findPlan()
 
 
         Log::i("  Expanding layer...\n");
+        Statistics::getInstance().beginTiming(TimingStage::EXPANSION);
         // Expand all the leaf nodes
         for (PdtNode* node : leaf_nodes)
         {
@@ -56,10 +57,13 @@ int Planner::findPlan()
             // Log::i("%s\n", TOSTR(*node));
             node->assignSatVariables(_htn, _print_var_names);
         }
+        Statistics::getInstance().endTiming(TimingStage::EXPANSION);
 
         Log::i("  Encoding...\n");
         // Encode the new leaf nodes
+        Statistics::getInstance().beginTiming(TimingStage::ENCODING);
         _enc.encode(new_leaf_nodes);
+        Statistics::getInstance().endTiming(TimingStage::ENCODING);
 
         // Add assumptions that each leaf node must be primitive
         std::vector<int> prim_vars;
@@ -69,7 +73,7 @@ int Planner::findPlan()
         }
         _enc.addAssumptions(prim_vars);
 
-        Log::i("  Solving...\n");
+        Log::i("  Solving... (%lld clauses, %d variables)\n", Statistics::getInstance()._num_cls, VariableProvider::getMaxVar());
         // Launch the SAT solver
         int result = _enc.solve();
         // _enc.writeFormula("formula_" + std::to_string(current_depth) + ".cnf");

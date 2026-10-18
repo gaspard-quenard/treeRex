@@ -10,6 +10,7 @@ class Encoding
 private:
     HtnInstance &_htn;
     SatInterface _sat;
+    Statistics &_stats = Statistics::getInstance();
 
     const bool _encode_mutexes = _htn.getParams().isNonzero("mutex");
 

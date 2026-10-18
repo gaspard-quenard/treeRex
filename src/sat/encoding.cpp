@@ -16,28 +16,41 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
         std::unordered_map<int, std::unordered_set<int>> negative_effs_can_be_implied_by;
 
         // Action implies precondition and effects, get as well all the predicates that can be changed and the actions that can change them
+        _stats.begin(STAGE_ACTIONS);
         encodeActions(node->getActionAndVariables(), current_fact_vars, next_fact_vars, positive_effs_can_be_implied_by, negative_effs_can_be_implied_by);
+        _stats.end(STAGE_ACTIONS);
 
         // Method implies precondition (Here method precondition is compiled into an action which is the first subtask of the method)
         // encodeMethods(node->getMethodAndVariables(), current_fact_vars, next_fact_vars);
 
         // action implies prim, method implies not prim
+        _stats.begin(STAGE_PRIMITIVENESS);
         encodePrimitivenessOps(node->getActionAndVariables(), node->getMethodAndVariables(), node->getPrimVariable());
+        _stats.end(STAGE_PRIMITIVENESS);
 
         // Encode frame axioms
+        _stats.begin(STAGE_FRAME_AXIOMS);
         encodeFrameAxioms(current_fact_vars, next_fact_vars, node->getPrimVariable(), positive_effs_can_be_implied_by, negative_effs_can_be_implied_by);
+        _stats.end(STAGE_FRAME_AXIOMS);
 
         // At most one action or method is selected
+        _stats.begin(STAGE_AT_MOST_ONE_ACTION);
         encodeAtMostOneOp(node->getActionAndVariables());
+        _stats.end(STAGE_AT_MOST_ONE_ACTION);
+        _stats.begin(STAGE_AT_MOST_ONE_METHOD);
         encodeAtMostOneOp(node->getMethodAndVariables());
+        _stats.end(STAGE_AT_MOST_ONE_METHOD);
 
         // Encode the hierarchy of each ops
+        _stats.begin(STAGE_HIERARCHY);
         encodeHierarchy(node, parent_node);
+        _stats.end(STAGE_HIERARCHY);
     }
 
     if (_encode_mutexes)
     {
         Log::i("  Encoding Mutexes\n");
+        _stats.begin(STAGE_MUTEXES);
         // Encode mutexes for all time steps
         for (int i = 0; i < leaf_nodes.size(); ++i)
         {
@@ -57,11 +70,13 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
                 encodeAtMostOne(group_vars);
             }
         }
+        _stats.end(STAGE_MUTEXES);
     }
 }
 
 void Encoding::initalEncode(PdtNode *root_node)
 {
+    _stats.begin(STAGE_INIT_GOAL_ROOT);
     // Encoding the initial state
     encodeInitialState(root_node->getFactVariables(), _htn.getInitState());
 
@@ -77,6 +92,7 @@ void Encoding::initalEncode(PdtNode *root_node)
 
     int var_root_method = root_node->getMethodAndVariables().begin()->second;
     _sat.addClause(var_root_method);
+    _stats.end(STAGE_INIT_GOAL_ROOT);
 }
 
 void Encoding::encodeInitialState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &init_state)
