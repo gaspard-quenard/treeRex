@@ -8,16 +8,6 @@ void PdtNode::addMethodIdx(int method_idx)
     _methods_idx.insert(method_idx);
 }
 
-void PdtNode::addParentOfMethod(int method_idx, int parent_method_idx)
-{
-    _parents_of_method[method_idx].insert(parent_method_idx);
-}
-
-void PdtNode::addParentOfAction(int action_idx, int parent_idx, OpType parent_type)
-{
-    _parents_of_action[action_idx].insert({parent_idx, parent_type});
-}
-
 void PdtNode::addActionIdx(int action_idx)
 {
     _actions_idx.insert(action_idx);
@@ -26,16 +16,6 @@ void PdtNode::addActionIdx(int action_idx)
 void PdtNode::addActionRepetitionIdx(int action_idx)
 {
     _actions_repetition_idx.insert(action_idx);
-}
-
-const std::unordered_map<int, std::unordered_set<int>> &PdtNode::getParentsOfMethod() const
-{
-    return _parents_of_method;
-}
-
-const std::unordered_map<int, std::unordered_set<std::pair<int, OpType>, PairHash>> &PdtNode::getParentsOfAction() const
-{
-    return _parents_of_action;
 }
 
 const std::unordered_set<int> &PdtNode::getMethodsIdx() const
@@ -54,6 +34,11 @@ const std::unordered_set<int> &PdtNode::getActionsRepetitionIdx() const
 }
 
 std::vector<PdtNode *> &PdtNode::getChildren()
+{
+    return _children;
+}
+
+const std::vector<PdtNode *> &PdtNode::getChildren() const
 {
     return _children;
 }
@@ -197,14 +182,12 @@ void PdtNode::expand(HtnInstance &htn)
         // Log::i("Repeating action %s\n", TOSTR(htn.getActionById(action_idx)));
         // child->addActionRepetitionIdx(action_idx);
         child->addActionIdx(action_idx);
-        child->addParentOfAction(action_idx, action_idx, OpType::ACTION);
 
         // The action add some blank actions in the remaining children
         for (size_t i = 1; i < num_children; ++i)
         {
             PdtNode *child = _children[i];
             child->addActionIdx(id_blank_action);
-            child->addParentOfAction(id_blank_action, action_idx, OpType::ACTION);
         }
     }
 
@@ -226,7 +209,6 @@ void PdtNode::expand(HtnInstance &htn)
                 for (int sub_method_idx : task.getDecompositionMethodsIdx())
                 {
                     jth_child->addMethodIdx(sub_method_idx);
-                    jth_child->addParentOfMethod(sub_method_idx, method_idx);
                     Log::d("At subtask %d, adding method %s\n", j, TOSTR(htn.getMethodById(sub_method_idx)));
                 }
             }
@@ -234,7 +216,6 @@ void PdtNode::expand(HtnInstance &htn)
             {
                 // Add the action to the j-th child
                 jth_child->addActionIdx(subtask_idx);
-                jth_child->addParentOfAction(subtask_idx, method_idx, OpType::METHOD);
                 Log::d("At subtask %d, adding action %s\n", j, TOSTR(htn.getActionById(subtask_idx)));
             }
         }
@@ -243,7 +224,6 @@ void PdtNode::expand(HtnInstance &htn)
         {
             PdtNode *child = _children[j];
             child->addActionIdx(id_blank_action);
-            child->addParentOfAction(id_blank_action, method_idx, OpType::METHOD);
         }
     }
 }

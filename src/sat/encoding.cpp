@@ -7,13 +7,13 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
     {
         // Log::i("Encode node %d/%d: %s\n", i, leaf_nodes.size(), TOSTR(*leaf_nodes[i]));
         PdtNode *node = leaf_nodes[i];
-        const PdtNode *parent_node = node->getParent();
 
         const FactVariables &current_fact_vars = node->getFactVariables();
         const FactVariables &next_fact_vars = i + 1 < leaf_nodes.size() ? leaf_nodes[i + 1]->getFactVariables() : _htn.getFactVarsGoal();
 
-        std::unordered_map<int, std::unordered_set<int>> positive_effs_can_be_implied_by;
-        std::unordered_map<int, std::unordered_set<int>> negative_effs_can_be_implied_by;
+        // For each predicate (index), the variables of the actions of this node which can add it (resp. delete it)
+        std::vector<std::vector<int>> positive_effs_can_be_implied_by(_htn.getNumPredicates());
+        std::vector<std::vector<int>> negative_effs_can_be_implied_by(_htn.getNumPredicates());
 
         // Action implies precondition and effects, get as well all the predicates that can be changed and the actions that can change them
         _stats.begin(STAGE_ACTIONS);
@@ -41,10 +41,14 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
         encodeAtMostOneOp(node->getMethodAndVariables());
         _stats.end(STAGE_AT_MOST_ONE_METHOD);
 
-        // Encode the hierarchy of each ops
-        _stats.begin(STAGE_HIERARCHY);
-        encodeHierarchy(node, parent_node);
-        _stats.end(STAGE_HIERARCHY);
+        // Encode the hierarchy between the parent of this node and all its children
+        // (done once per parent, when we meet its first child)
+        if (node->isFirstChild())
+        {
+            _stats.begin(STAGE_HIERARCHY);
+            encodeHierarchy(node->getParent());
+            _stats.end(STAGE_HIERARCHY);
+        }
     }
 
     if (_encode_mutexes)
@@ -121,7 +125,7 @@ void Encoding::encodeGoalState(const FactVariables &all_pred_vars, const std::un
     }
 }
 
-void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, std::vector<std::vector<int>> &positive_effs_can_be_implied_by, std::vector<std::vector<int>> &negative_effs_can_be_implied_by)
 {
     for (const auto &[action_idx, action_var] : map_action_idx_to_var)
     {
@@ -137,13 +141,13 @@ void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_
         for (int pos_effect_idx : action.getPosEffsIdx())
         {
             _sat.addClause(-action_var, next_fact_vars[pos_effect_idx]);
-            positive_effs_can_be_implied_by[pos_effect_idx].insert(action_var);
+            positive_effs_can_be_implied_by[pos_effect_idx].push_back(action_var);
         }
 
         for (int neg_effect_idx : action.getNegEffsIdx())
         {
             _sat.addClause(-action_var, -next_fact_vars[neg_effect_idx]);
-            negative_effs_can_be_implied_by[neg_effect_idx].insert(action_var);
+            negative_effs_can_be_implied_by[neg_effect_idx].push_back(action_var);
         }
     }
 }
@@ -174,7 +178,7 @@ void Encoding::encodePrimitivenessOps(const std::unordered_map<int, int> &map_ac
     }
 }
 
-void Encoding::encodeFrameAxioms(const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, const int &prim_var, const std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, const std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+void Encoding::encodeFrameAxioms(const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, const int &prim_var, const std::vector<std::vector<int>> &positive_effs_can_be_implied_by, const std::vector<std::vector<int>> &negative_effs_can_be_implied_by)
 {
     for (int i = 0; i < _htn.getNumPredicates(); i++)
     {
@@ -185,23 +189,17 @@ void Encoding::encodeFrameAxioms(const FactVariables &current_fact_vars, const F
         // (not pred__t or pred__t+1 or non_prim or action_1_with_negative_effect or action_2_with_negative_effect)
         _sat.appendClause(-current_fact_vars[i], next_fact_vars[i]);
         _sat.appendClause(-prim_var);
-        if (negative_effs_can_be_implied_by.find(i) != negative_effs_can_be_implied_by.end())
+        for (int action_var : negative_effs_can_be_implied_by[i])
         {
-            for (int action_var : negative_effs_can_be_implied_by.at(i))
-            {
-                _sat.appendClause(action_var);
-            }
+            _sat.appendClause(action_var);
         }
         _sat.endClause();
         // Do the same things if a predicate was false and become true
         _sat.appendClause(current_fact_vars[i], -next_fact_vars[i]);
         _sat.appendClause(-prim_var);
-        if (positive_effs_can_be_implied_by.find(i) != positive_effs_can_be_implied_by.end())
+        for (int action_var : positive_effs_can_be_implied_by[i])
         {
-            for (int action_var : positive_effs_can_be_implied_by.at(i))
-            {
-                _sat.appendClause(action_var);
-            }
+            _sat.appendClause(action_var);
         }
         _sat.endClause();
     }
@@ -231,54 +229,49 @@ void Encoding::encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_
     encodeAtMostOne(op_vars);
 }
 
-void Encoding::encodeHierarchy(const PdtNode *cur_node, const PdtNode *parent_node)
+void Encoding::encodeHierarchy(const PdtNode *parent_node)
 {
-    // For each parent op, get the possible children
-    std::unordered_map<int, std::unordered_set<int>> possible_children_var_per_op_var;
+    // Each op of the parent implies, in each child, at least one of the ops it can be decomposed into.
+    // These are exactly the ops added to the children by PdtNode::expand.
+    const std::vector<PdtNode *> &children = parent_node->getChildren();
+    int blank_action_idx = _htn.getBlankAction().getId();
 
-    for (const auto &[child_method, possible_parent] : cur_node->getParentsOfMethod())
+    // An action is repeated in the first child, and is followed by blank actions in the other children
+    for (const auto &[action_idx, action_var] : parent_node->getActionAndVariables())
     {
-        int var_child = cur_node->getMethodAndVariables().at(child_method);
-        for (int parent_method : possible_parent)
+        _sat.addClause(-action_var, children[0]->getActionAndVariables().at(action_idx));
+        for (size_t j = 1; j < children.size(); ++j)
         {
-            int var_parent = parent_node->getMethodAndVariables().at(parent_method);
-            possible_children_var_per_op_var[var_parent].insert(var_child);
-        }
-    }
-    // Iterate through the actions in the current node and their potential parents
-    for (const auto &[child_action_idx, possible_parents_set] : cur_node->getParentsOfAction())
-    {
-        int var_child = cur_node->getActionAndVariables().at(child_action_idx);
-        // Iterate through the set of parent pairs (ID, Type) for this child action
-        for (const auto &parent_pair : possible_parents_set)
-        {
-            int parent_idx = parent_pair.first;
-            OpType parent_type = parent_pair.second;
-
-            int var_parent;
-            // Get the parent variable based on its type
-            if (parent_type == OpType::ACTION)
-            {
-                var_parent = parent_node->getActionAndVariables().at(parent_idx);
-            }
-            else // OpType::METHOD
-            {
-                var_parent = parent_node->getMethodAndVariables().at(parent_idx);
-            }
-            // Add the child variable to the set associated with the parent variable
-            possible_children_var_per_op_var[var_parent].insert(var_child);
+            _sat.addClause(-action_var, children[j]->getActionAndVariables().at(blank_action_idx));
         }
     }
 
-    // Each parent implies at least one child
-    for (const auto &[parent_var, children_var] : possible_children_var_per_op_var)
+    // A method implies its j-th subtask in the j-th child (if the subtask is abstract: one of its methods),
+    // and blank actions in the children after its last subtask
+    for (const auto &[method_idx, method_var] : parent_node->getMethodAndVariables())
     {
-        _sat.appendClause(-parent_var);
-        for (int child_var : children_var)
+        const std::vector<int> &subtasks_idx = _htn.getMethodById(method_idx).getSubtasksIdx();
+        for (size_t j = 0; j < children.size(); ++j)
         {
-            _sat.appendClause(child_var);
+            const PdtNode *child = children[j];
+            _sat.appendClause(-method_var);
+            if (j >= subtasks_idx.size())
+            {
+                _sat.appendClause(child->getActionAndVariables().at(blank_action_idx));
+            }
+            else if (_htn.isAbstractTask(subtasks_idx[j]))
+            {
+                for (int sub_method_idx : _htn.getAbstractTaskById(subtasks_idx[j]).getDecompositionMethodsIdx())
+                {
+                    _sat.appendClause(child->getMethodAndVariables().at(sub_method_idx));
+                }
+            }
+            else
+            {
+                _sat.appendClause(child->getActionAndVariables().at(subtasks_idx[j]));
+            }
+            _sat.endClause();
         }
-        _sat.endClause();
     }
 }
 

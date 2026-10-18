@@ -16,13 +16,13 @@ private:
 
     void encodeInitialState(const FactVariables &all_pred_vars, const std::unordered_set<int> &init_state);
     void encodeGoalState(const FactVariables &all_pred_vars, const std::unordered_set<int> &goal_state);
-    void encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by);
+    void encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, std::vector<std::vector<int>> &positive_effs_can_be_implied_by, std::vector<std::vector<int>> &negative_effs_can_be_implied_by);
     void encodeMethods(const std::unordered_map<int, int> &map_method_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars);
     void encodePrimitivenessOps(const std::unordered_map<int, int> &map_action_idx_to_var, const std::unordered_map<int, int> &map_method_idx_to_var, const int &prim_var);
-    void encodeFrameAxioms(const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, const int &prim_var, const std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, const std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by);
+    void encodeFrameAxioms(const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, const int &prim_var, const std::vector<std::vector<int>> &positive_effs_can_be_implied_by, const std::vector<std::vector<int>> &negative_effs_can_be_implied_by);
     void encodeAtMostOneOp(const std::unordered_map<int, int> &map_op_idx_to_var);
     void encodeAtMostOne(const std::vector<int> &vars);
-    void encodeHierarchy(const PdtNode *cur_node, const PdtNode *parentNode);
+    void encodeHierarchy(const PdtNode *parent_node);
 
 public:
     Encoding(HtnInstance &htn) : _htn(htn), _sat(htn.getParams()) {}
