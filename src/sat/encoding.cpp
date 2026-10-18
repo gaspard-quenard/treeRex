@@ -58,6 +58,11 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
         // Encode mutexes for all time steps
         for (int i = 0; i < leaf_nodes.size(); ++i)
         {
+            // A first child has the same fact variables as its parent: the mutexes on these variables
+            // are already encoded (or, for the root, implied by the initial state). No need to add them again.
+            if (leaf_nodes[i]->isFirstChild())
+                continue;
+
             const FactVariables &current_fact_vars = leaf_nodes[i]->getFactVariables();
             // Encode all groups
             for (const std::vector<int> &group : _htn.getMutex().getMutexGroups())
