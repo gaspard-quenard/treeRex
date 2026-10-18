@@ -8,6 +8,7 @@
 #include <functional> // For std::hash
 
 #include "data/htn_instance.h"
+#include "sat/variable_provider.h"
 
 enum class OpType
 {
@@ -48,7 +49,7 @@ private:
 
     std::unordered_map<int, int> _method_variables;
     std::unordered_map<int, int> _action_variables;
-    std::vector<int> _fact_variables; // Indexed by predicate ID
+    FactVariables _fact_variables; // Variable of each predicate at this position
     int _prim_var;
 
     // For the solution, get the type and id of the op solution 
@@ -94,7 +95,9 @@ public:
     const std::unordered_map<int, std::unordered_set<int>> &getParentsOfMethod() const;
     const std::unordered_map<int, std::unordered_set<std::pair<int, OpType>, PairHash>> &getParentsOfAction() const;
 
-    const std::vector<int> &getFactVariables() const;
+    const FactVariables &getFactVariables() const;
+    // The first child of a node has the same fact variables as its parent
+    bool isFirstChild() const;
     const std::unordered_map<int, int> &getMethodAndVariables() const;
     const std::unordered_map<int, int> &getActionAndVariables() const;
     const int getPrimVariable() const;

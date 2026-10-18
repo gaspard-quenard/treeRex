@@ -98,10 +98,7 @@ void HtnInstance::loadGroundedProblem(const std::string &grounded_problem_filepa
     _id_goal_action = _actions.size() + _abstr_tasks.size();
 
     // Initialize all the facts vars for the goal state
-    for (int i = 0; i < _predicates.size(); i++)
-    {
-        _all_fact_vars_goal.push_back(VariableProvider::nextVar());
-    }
+    _all_fact_vars_goal.first_var = VariableProvider::nextVars(_predicates.size());
 
     Names::init(_predicates, _actions, _abstr_tasks, _methods, _blankAction);
 
@@ -601,7 +598,7 @@ const int HtnInstance::getNumPredicates() const
     return _predicates.size();
 }
 
-const std::vector<int> &HtnInstance::getFactVarsGoal() const
+const FactVariables &HtnInstance::getFactVarsGoal() const
 {
     return _all_fact_vars_goal;
 }

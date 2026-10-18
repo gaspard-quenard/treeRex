@@ -9,8 +9,8 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
         PdtNode *node = leaf_nodes[i];
         const PdtNode *parent_node = node->getParent();
 
-        const std::vector<int> &current_fact_vars = node->getFactVariables();
-        const std::vector<int> &next_fact_vars = i + 1 < leaf_nodes.size() ? leaf_nodes[i + 1]->getFactVariables() : _htn.getFactVarsGoal();
+        const FactVariables &current_fact_vars = node->getFactVariables();
+        const FactVariables &next_fact_vars = i + 1 < leaf_nodes.size() ? leaf_nodes[i + 1]->getFactVariables() : _htn.getFactVarsGoal();
 
         std::unordered_map<int, std::unordered_set<int>> positive_effs_can_be_implied_by;
         std::unordered_map<int, std::unordered_set<int>> negative_effs_can_be_implied_by;
@@ -54,7 +54,7 @@ void Encoding::encode(std::vector<PdtNode *> &leaf_nodes)
         // Encode mutexes for all time steps
         for (int i = 0; i < leaf_nodes.size(); ++i)
         {
-            const std::vector<int> &current_fact_vars = leaf_nodes[i]->getFactVariables();
+            const FactVariables &current_fact_vars = leaf_nodes[i]->getFactVariables();
             // Encode all groups
             for (const std::vector<int> &group : _htn.getMutex().getMutexGroups())
             {
@@ -95,7 +95,7 @@ void Encoding::initalEncode(PdtNode *root_node)
     _stats.end(STAGE_INIT_GOAL_ROOT);
 }
 
-void Encoding::encodeInitialState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &init_state)
+void Encoding::encodeInitialState(const FactVariables &all_pred_vars, const std::unordered_set<int> &init_state)
 {
     for (int i = 0; i < _htn.getNumPredicates(); i++)
     {
@@ -110,7 +110,7 @@ void Encoding::encodeInitialState(const std::vector<int> &all_pred_vars, const s
     }
 }
 
-void Encoding::encodeGoalState(const std::vector<int> &all_pred_vars, const std::unordered_set<int> &goal_state)
+void Encoding::encodeGoalState(const FactVariables &all_pred_vars, const std::unordered_set<int> &goal_state)
 {
     for (int i = 0; i < _htn.getNumPredicates(); i++)
     {
@@ -121,7 +121,7 @@ void Encoding::encodeGoalState(const std::vector<int> &all_pred_vars, const std:
     }
 }
 
-void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
 {
     for (const auto &[action_idx, action_var] : map_action_idx_to_var)
     {
@@ -148,7 +148,7 @@ void Encoding::encodeActions(const std::unordered_map<int, int> &map_action_idx_
     }
 }
 
-// void Encoding::encodeMethods(const std::unordered_map<int, int> &map_method_idx_to_var, const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars) {
+// void Encoding::encodeMethods(const std::unordered_map<int, int> &map_method_idx_to_var, const FactVariables &current_fact_vars, const FactVariables &next_fact_vars) {
 //     for (const auto &[method_idx, method_var] : map_method_idx_to_var)
 //     {
 //         const Method &method = _htn.getMethodById(method_idx);
@@ -174,7 +174,7 @@ void Encoding::encodePrimitivenessOps(const std::unordered_map<int, int> &map_ac
     }
 }
 
-void Encoding::encodeFrameAxioms(const std::vector<int> &current_fact_vars, const std::vector<int> &next_fact_vars, const int &prim_var, const std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, const std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
+void Encoding::encodeFrameAxioms(const FactVariables &current_fact_vars, const FactVariables &next_fact_vars, const int &prim_var, const std::unordered_map<int, std::unordered_set<int>> &positive_effs_can_be_implied_by, const std::unordered_map<int, std::unordered_set<int>> &negative_effs_can_be_implied_by)
 {
     for (int i = 0; i < _htn.getNumPredicates(); i++)
     {

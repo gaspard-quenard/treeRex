@@ -11,6 +11,7 @@
 #include "data/abstract_task.h"
 #include "data/mutex.h"
 #include "util/params.h"
+#include "sat/variable_provider.h"
 
 
 class HtnInstance
@@ -30,7 +31,7 @@ private:
     int _root_task_idx;
     std::unordered_set<int> _init_state;
     std::unordered_set<int> _goal_state;
-    std::vector<int> _all_fact_vars_goal;
+    FactVariables _all_fact_vars_goal;
 
     /**
      * Parse the domain and problem files using pandaPIparser.
@@ -161,7 +162,7 @@ public:
     const std::unordered_set<int> &getInitState() const;
     const std::unordered_set<int> &getGoalState() const;
     const int getNumPredicates() const;
-    const std::vector<int> &getFactVarsGoal() const;
+    const FactVariables &getFactVarsGoal() const;
     Mutex& getMutex() { return _mutex; }
 };
 

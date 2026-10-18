@@ -63,9 +63,14 @@ const PdtNode *PdtNode::getParent() const
     return _parent;
 }
 
-const std::vector<int> &PdtNode::getFactVariables() const
+const FactVariables &PdtNode::getFactVariables() const
 {
     return _fact_variables;
+}
+
+bool PdtNode::isFirstChild() const
+{
+    return _parent != nullptr && _offset == 0;
 }
 
 const std::unordered_map<int, int> &PdtNode::getMethodAndVariables() const
@@ -133,22 +138,20 @@ void PdtNode::assignSatVariables(const HtnInstance &htn, const bool print_var_na
 
     // Assign a variable to each predicate
     // If we are the first child of the parent, we have the same fact variables as the parent
-    // bool first_child = _parent != nullptr && _parent->_children[0] == this;
-    bool first_child = _parent != nullptr && _offset == 0;
-    if (first_child)
+    if (isFirstChild())
     {
         _fact_variables = _parent->_fact_variables;
     }
     else
     {
-        for (int pred_id = 0; pred_id < num_predicates; ++pred_id)
+        _fact_variables.first_var = VariableProvider::nextVars(num_predicates);
+        if (print_var_names)
         {
-            _fact_variables.push_back(VariableProvider::nextVar());
-            if (print_var_names)
+            for (int pred_id = 0; pred_id < num_predicates; ++pred_id)
             {
                 std::string pred_name = htn.getPredicateById(pred_id).getName() + "__" + getPositionString();
                 Log::i("PVN: %d %s\n", _fact_variables[pred_id], pred_name.c_str());
-            } 
+            }
         }
     }
 
